@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "search-stock-news": {
+      "source": "/home/ubuntu/.config/browserbase/skills/finance.yahoo.com/search-stock-news-dnf5k3",
+      "sourceType": "local",
+      "computedHash": "b554f6339e7485e964a9c55390f48115b3970f3024fabd2336b3850cb74ef935"
+    }
+  }
+}

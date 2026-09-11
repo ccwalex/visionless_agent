@@ -11,6 +11,8 @@ Complement a Grok-style browser agent: **Chrome loads the page, this script read
 python3 scripts/inspect.py --html tests/fixtures/search_form.html
 python3 scripts/inspect.py --url https://example.com
 python3 scripts/inspect.py --cdp 9222 --json
+python3 scripts/inspect.py --cdp 9222 --list-tabs --json
+python3 scripts/inspect.py --cdp 9222 --tab 1 --json
 python3 scripts/inspect.py --url https://example.com --dump-dom
 ```
 
@@ -18,9 +20,21 @@ python3 scripts/inspect.py --url https://example.com --dump-dom
 
 1. Open (or attach to) Chrome. Prefer a **deep link**, not “find the Search button.”
 2. Run `inspect.py` on that document.
-3. Read `pathways`, `forms`, `buttons`, `loose_fields`. Each control has a CSS `selector`.
+3. Read `controls`, `contents`, `pathways`, `forms`, `buttons`, `links`. Each control has a CSS `selector`.
 4. Choose **one** pathway. Prefer `GET` query URLs when `method=get`. Otherwise fill via CDP/`document.querySelector` + `Enter`/`form.submit()` — still no screenshot loop.
 5. Re-inspect after navigation. Selectors are not stable across document reloads.
+
+## Multi-tab
+
+List tabs with stable integer ids and opener lineage:
+
+```bash
+python3 scripts/inspect.py --cdp 9222 --list-tabs --json
+python3 scripts/inspect.py --cdp 9222 --tab 0 --json
+python3 scripts/inspect.py --cdp 9222 --tab 0 --new-tab https://example.com --json
+```
+
+Each inventory includes `tab: { id, opened_from, url, title, cdp_id }`. Tab 1 opened from tab 0 shows `"opened_from": 0`. Saved HTML dumps prepend `<header data-inspect-tab="…" data-opened-from="…">` so the source is self-describing.
 
 ## Follow an existing Chrome session (login-capable)
 
@@ -37,6 +51,7 @@ Then, after the human has browsed to the interesting page:
 ```bash
 python3 scripts/inspect.py --cdp 9222 --json
 python3 scripts/inspect.py --cdp 9222 --target github.com --json
+python3 scripts/inspect.py --cdp 9222 --tab 1 --json
 ```
 
 `--cdp` **does not navigate** unless you pass `--navigate URL` or `--force-navigate` with `--url`. Default is “tell me what this tab can do.”
@@ -65,14 +80,20 @@ That polls until `auth.likely` is false or the timeout hits.
 
 | Field | Use |
 |---|---|
+| `controls[]` | Full map of interactive elements (`id`, `role`, `selector`, `text`, `form`) |
+| `contents.text` | Visible page text after ad strip |
+| `contents.headings` | `h1`–`h6` |
+| `contents.landmarks` | `main`, `nav`, `article`, etc. |
+| `contents.media` | Images and video |
+| `adblock` | Nodes stripped from source (`scripts/adblock_rules.json`) |
 | `forms[].fields[].selector` | Where to type |
 | `forms[].submits[].selector` | Submit control for that form |
 | `pathways[].kind = fill_and_submit` | Ordered fill plan + optional `get_shortcut` |
 | `pathways[].kind = activate` | A button that is not part of a form |
 | `pathways[].kind = handoff` | Stop; give the browser to the human |
-| `buttons` / `links` | Leftover controls not covered above |
+| `buttons` / `links` | Views over `controls` |
 
-Live Chrome (`--cdp`) uses in-page `innerText`, labels, disabled, and visibility (`scripts/extract_affordances.js`). `--html` / `--url` uses a deterministic HTML parser (`scripts/affordances.py`) on dump-dom or saved source.
+Default CDP path dumps HTML, strips ads, and parses with `scripts/affordances.py` (deterministic). Use `--live-dom` for computed visibility via `scripts/extract_affordances.js`. Use `--no-adblock` to skip stripping.
 
 Fill a mapped field without a mouse:
 
@@ -89,3 +110,4 @@ That sets the input with the native value setter, fires `input`/`change`, then `
 - Opening a homepage only to hunt for a Search button when `?q=` exists
 - Filling a password field from the agent
 - Reusing selectors after a full navigation without re-inspect
+- Reading only `pathways` when you need the full `controls` + `contents` map

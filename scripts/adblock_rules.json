@@ -1,0 +1,59 @@
+{
+  "_comment": "Readable ad-strip rules for deterministic HTML inventory. Not EasyList.",
+  "hosts": [
+    "doubleclick.net",
+    "googlesyndication.com",
+    "googleadservices.com",
+    "adservice.google.com",
+    "taboola.com",
+    "outbrain.com",
+    "amazon-adsystem.com",
+    "facebook.net/tr",
+    "scorecardresearch.com"
+  ],
+  "id_class_patterns": [
+    "adsbygoogle",
+    "ad-container",
+    "ad-slot",
+    "ad-banner",
+    "advertisement",
+    "sponsored-content",
+    "sponsored-post",
+    "google-ad",
+    "dfp-ad",
+    "taboola",
+    "outbrain"
+  ],
+  "tag_patterns": [
+    {
+      "tag": "ins",
+      "class_contains": "adsbygoogle",
+      "reason": "adsbygoogle_ins"
+    },
+    {
+      "tag": "iframe",
+      "src_contains": "doubleclick",
+      "reason": "doubleclick_iframe"
+    },
+    {
+      "tag": "iframe",
+      "src_contains": "googlesyndication",
+      "reason": "googlesyndication_iframe"
+    },
+    {
+      "tag": "iframe",
+      "src_contains": "googleadservices",
+      "reason": "googleadservices_iframe"
+    },
+    {
+      "tag": "div",
+      "id_prefix": "ad-",
+      "reason": "ad_id_prefix"
+    },
+    {
+      "tag": "div",
+      "class_prefix": "ad-",
+      "reason": "ad_class_prefix"
+    }
+  ]
+}

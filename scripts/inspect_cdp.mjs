@@ -1,10 +1,6 @@
 #!/usr/bin/env node
 /**
- * Attach to Chrome DevTools Protocol, evaluate extract_affordances.js in the page.
- * Usage:
- *   node scripts/inspect_cdp.mjs --port 9222
- *   node scripts/inspect_cdp.mjs --port 9222 --target https://example.com
- *   node scripts/inspect_cdp.mjs --port 9222 --navigate https://example.com
+ * Attach to Chrome DevTools Protocol: multi-tab registry, inspect, fill.
  */
 import fs from "node:fs";
 import http from "node:http";
@@ -24,6 +20,11 @@ function parseArgs(argv) {
     value: "",
     submitForm: null,
     inspect: true,
+    listTabs: false,
+    tab: null,
+    newTab: null,
+    liveDom: false,
+    noAdblock: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -36,6 +37,11 @@ function parseArgs(argv) {
     else if (a === "--value") out.value = argv[++i];
     else if (a === "--submit-form") out.submitForm = argv[++i];
     else if (a === "--no-inspect") out.inspect = false;
+    else if (a === "--list-tabs") out.listTabs = true;
+    else if (a === "--tab") out.tab = Number(argv[++i]);
+    else if (a === "--new-tab") out.newTab = argv[++i];
+    else if (a === "--live-dom") out.liveDom = true;
+    else if (a === "--no-adblock") out.noAdblock = true;
   }
   return out;
 }
@@ -56,6 +62,53 @@ function httpGetJson(url) {
       })
       .on("error", reject);
   });
+}
+
+function registryPath(port) {
+  return `/tmp/visionless-tabs-${port}.json`;
+}
+
+function loadRegistry(port) {
+  const p = registryPath(port);
+  if (!fs.existsSync(p)) return { next_index: 0, tabs: {} };
+  return JSON.parse(fs.readFileSync(p, "utf8"));
+}
+
+function saveRegistry(port, data) {
+  fs.writeFileSync(registryPath(port), JSON.stringify(data, null, 2));
+}
+
+function mergeTargets(registry, targets, openerByCdpId = {}) {
+  const tabs = registry.tabs || (registry.tabs = {});
+  let nextIndex = registry.next_index || 0;
+  const liveIds = new Set(targets.map((t) => t.id));
+  for (const cdpId of Object.keys(tabs)) {
+    if (!liveIds.has(cdpId)) delete tabs[cdpId];
+  }
+  for (const target of targets) {
+    const cdpId = target.id;
+    if (!tabs[cdpId]) {
+      const openerCdp = openerByCdpId[cdpId];
+      let openerIndex = null;
+      if (openerCdp && tabs[openerCdp]) openerIndex = tabs[openerCdp].index;
+      tabs[cdpId] = { index: nextIndex++, opener_index: openerIndex };
+    }
+    tabs[cdpId].url = target.url || "";
+    tabs[cdpId].title = target.title || "";
+  }
+  registry.next_index = nextIndex;
+  const out = targets.map((target) => {
+    const rec = tabs[target.id];
+    return {
+      id: rec.index,
+      opened_from: rec.opener_index ?? null,
+      url: rec.url || target.url || "",
+      title: rec.title || target.title || "",
+      cdp_id: target.id,
+    };
+  });
+  out.sort((a, b) => a.id - b.id);
+  return out;
 }
 
 function cdpSession(wsUrl) {
@@ -97,121 +150,247 @@ function cdpSession(wsUrl) {
   });
 }
 
+async function fetchPages(host, port) {
+  const listUrl = `http://${host}:${port}/json/list`;
+  const targets = await httpGetJson(listUrl);
+  return (targets || []).filter((t) => t.type === "page" && t.webSocketDebuggerUrl);
+}
+
+async function getBrowserWs(host, port) {
+  const ver = await httpGetJson(`http://${host}:${port}/json/version`);
+  return ver.webSocketDebuggerUrl;
+}
+
+async function getOpenerMap(browserSession, pages) {
+  const openerByCdpId = {};
+  for (const page of pages) {
+    try {
+      const info = await browserSession.send("Target.getTargetInfo", { targetId: page.id });
+      openerByCdpId[page.id] = info?.targetInfo?.openerId || null;
+    } catch {
+      openerByCdpId[page.id] = null;
+    }
+  }
+  return openerByCdpId;
+}
+
+function pickPage(pages, tabs, args) {
+  if (args.tab != null && !Number.isNaN(args.tab)) {
+    const hit = tabs.find((t) => t.id === args.tab);
+    if (!hit) throw new Error(`tab_not_found: no tab with id ${args.tab}`);
+    const page = pages.find((p) => p.id === hit.cdp_id);
+    if (!page) throw new Error(`tab_not_found: CDP target gone for tab ${args.tab}`);
+    return { page, tab: hit };
+  }
+  const needle = args.navigate || args.target;
+  if (needle) {
+    const page =
+      pages.find((p) => (p.url || "").includes(needle)) ||
+      pages.find((p) => (p.title || "").includes(needle)) ||
+      pages[0];
+    const tab = tabs.find((t) => t.cdp_id === page.id) || tabs[0];
+    return { page, tab };
+  }
+  return { page: pages[0], tab: tabs[0] };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const listUrl = `http://${args.host}:${args.port}/json/list`;
-  let targets;
+  let pages;
   try {
-    targets = await httpGetJson(listUrl);
+    pages = await fetchPages(args.host, args.port);
   } catch (err) {
     console.error(
       JSON.stringify({
         error: "cdp_unavailable",
-        message: `Cannot reach Chrome at ${listUrl}. Start Chrome with --remote-debugging-port=${args.port}`,
+        message: `Cannot reach Chrome at http://${args.host}:${args.port}/json/list. Start Chrome with --remote-debugging-port=${args.port}`,
         detail: String(err.message || err),
       })
     );
     process.exit(2);
   }
-  const pages = (targets || []).filter((t) => t.type === "page" && t.webSocketDebuggerUrl);
   if (!pages.length) {
     console.error(JSON.stringify({ error: "no_page_targets", message: "Chrome is up but has no inspectable tabs." }));
     process.exit(2);
   }
-  let page = pages[0];
-  const needle = args.navigate || args.target;
-  if (needle) {
-    page =
-      pages.find((p) => (p.url || "").includes(needle)) ||
-      pages.find((p) => (p.title || "").includes(needle)) ||
-      page;
-  }
 
-  const session = await cdpSession(page.webSocketDebuggerUrl);
+  const browserWs = await getBrowserWs(args.host, args.port);
+  const browserSession = await cdpSession(browserWs);
   try {
-    await session.send("Runtime.enable");
-    await session.send("Page.enable");
-    if (args.navigate) {
-      await session.send("Page.navigate", { url: args.navigate });
-      for (let i = 0; i < 25; i++) {
-        const ready = await session.send("Runtime.evaluate", {
-          expression: "document.readyState",
+    const openerByCdpId = await getOpenerMap(browserSession, pages);
+    const registry = loadRegistry(args.port);
+    let tabs = mergeTargets(registry, pages, openerByCdpId);
+    saveRegistry(args.port, registry);
+
+    if (args.listTabs) {
+      process.stdout.write(JSON.stringify({ tabs }, null, 2) + "\n");
+      return;
+    }
+
+    let { page, tab } = pickPage(pages, tabs, args);
+
+    if (args.newTab) {
+      await browserSession.send("Target.createTarget", {
+        url: args.newTab,
+        newWindow: false,
+        background: false,
+        openerId: page.id,
+      });
+      await new Promise((r) => setTimeout(r, 800));
+      pages = await fetchPages(args.host, args.port);
+      const openerMap = await getOpenerMap(browserSession, pages);
+      tabs = mergeTargets(registry, pages, openerMap);
+      saveRegistry(args.port, registry);
+      const child = tabs.filter((t) => t.opened_from === tab.id).sort((a, b) => b.id - a.id)[0];
+      if (child) {
+        tab = child;
+        page = pages.find((p) => p.id === child.cdp_id) || pages[pages.length - 1];
+      } else {
+        tab = tabs[tabs.length - 1];
+        page = pages.find((p) => p.id === tab.cdp_id) || pages[pages.length - 1];
+      }
+    }
+
+    if (args.tab != null) {
+      await browserSession.send("Target.activateTarget", { targetId: page.id });
+    }
+
+    const session = await cdpSession(page.webSocketDebuggerUrl);
+    try {
+      await session.send("Runtime.enable");
+      await session.send("Page.enable");
+
+      if (args.navigate) {
+        await session.send("Page.navigate", { url: args.navigate });
+        for (let i = 0; i < 25; i++) {
+          const ready = await session.send("Runtime.evaluate", {
+            expression: "document.readyState",
+            returnByValue: true,
+          });
+          const state = ready.result && ready.result.value;
+          if (state === "interactive" || state === "complete") break;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        await new Promise((r) => setTimeout(r, 300));
+      }
+
+      if (args.fill) {
+        const fillExpr = `(() => {
+          const sel = ${JSON.stringify(args.fill)};
+          const value = ${JSON.stringify(args.value)};
+          const formSel = ${JSON.stringify(args.submitForm || "")};
+          const el = document.querySelector(sel);
+          if (!el) return { ok: false, error: "no_element", sel };
+          el.focus();
+          const proto = el instanceof HTMLInputElement
+            ? HTMLInputElement.prototype
+            : HTMLTextAreaElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+          if (setter) setter.call(el, value);
+          else el.value = value;
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          if (formSel) {
+            const form = document.querySelector(formSel);
+            if (!form) return { ok: false, error: "no_form", formSel, value: el.value };
+            if (typeof form.requestSubmit === "function") form.requestSubmit();
+            else form.submit();
+          }
+          return { ok: true, filled: sel, value: el.value, url: location.href };
+        })()`;
+        const filled = await session.send("Runtime.evaluate", {
+          expression: fillExpr,
           returnByValue: true,
         });
-        const state = ready.result && ready.result.value;
-        if (state === "interactive" || state === "complete") break;
-        await new Promise((r) => setTimeout(r, 200));
-      }
-      await new Promise((r) => setTimeout(r, 300));
-    }
-    if (args.fill) {
-      const fillExpr = `(() => {
-        const sel = ${JSON.stringify(args.fill)};
-        const value = ${JSON.stringify(args.value)};
-        const formSel = ${JSON.stringify(args.submitForm || "")};
-        const el = document.querySelector(sel);
-        if (!el) return { ok: false, error: "no_element", sel };
-        el.focus();
-        const proto = el instanceof HTMLInputElement
-          ? HTMLInputElement.prototype
-          : HTMLTextAreaElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-        if (setter) setter.call(el, value);
-        else el.value = value;
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-        el.dispatchEvent(new Event("change", { bubbles: true }));
-        if (formSel) {
-          const form = document.querySelector(formSel);
-          if (!form) return { ok: false, error: "no_form", formSel, value: el.value };
-          if (typeof form.requestSubmit === "function") form.requestSubmit();
-          else form.submit();
+        if (filled.exceptionDetails) {
+          throw new Error(filled.exceptionDetails.text || "fill evaluate failed");
         }
-        return { ok: true, filled: sel, value: el.value, url: location.href };
-      })()`;
-      const filled = await session.send("Runtime.evaluate", {
-        expression: fillExpr,
+        const fillValue = filled.result && filled.result.value;
+        if (!fillValue || !fillValue.ok) {
+          process.stdout.write(JSON.stringify({ error: "fill_failed", detail: fillValue }, null, 2) + "\n");
+          process.exit(2);
+        }
+        const before = fillValue.url;
+        for (let i = 0; i < 40; i++) {
+          const loc = await session.send("Runtime.evaluate", {
+            expression: "location.href",
+            returnByValue: true,
+          });
+          const href = loc.result && loc.result.value;
+          if (href && href !== before) break;
+          await new Promise((r) => setTimeout(r, 150));
+        }
+        await new Promise((r) => setTimeout(r, 400));
+        if (!args.inspect) {
+          process.stdout.write(
+            JSON.stringify(
+              {
+                action: fillValue,
+                url: (await session.send("Runtime.evaluate", { expression: "location.href", returnByValue: true }))
+                  .result.value,
+              },
+              null,
+              2
+            ) + "\n"
+          );
+          return;
+        }
+      }
+
+      if (!args.inspect) return;
+
+      const loc = await session.send("Runtime.evaluate", {
+        expression: "({ url: location.href, title: document.title })",
         returnByValue: true,
       });
-      if (filled.exceptionDetails) {
-        throw new Error(filled.exceptionDetails.text || "fill evaluate failed");
+      const liveMeta = loc.result && loc.result.value;
+      if (liveMeta) {
+        tab = { ...tab, url: liveMeta.url || tab.url, title: liveMeta.title || tab.title };
       }
-      const fillValue = filled.result && filled.result.value;
-      if (!fillValue || !fillValue.ok) {
-        process.stdout.write(JSON.stringify({ error: "fill_failed", detail: fillValue }, null, 2) + "\n");
-        process.exit(2);
-      }
-      const before = fillValue.url;
-      for (let i = 0; i < 40; i++) {
-        const loc = await session.send("Runtime.evaluate", {
-          expression: "location.href",
+
+      if (args.liveDom) {
+        const extractSrc = fs.readFileSync(path.join(__dirname, "extract_affordances.js"), "utf8");
+        const rulesSrc = fs.readFileSync(path.join(__dirname, "adblock_rules.json"), "utf8");
+        const hidden = args.includeHidden ? "true" : "false";
+        const noAdblock = args.noAdblock ? "true" : "false";
+        const expression = `${extractSrc}\nextractAffordances({ includeHidden: ${hidden}, adblockRules: ${noAdblock ? "null" : rulesSrc}, tab: ${JSON.stringify(tab)} });`;
+        const result = await session.send("Runtime.evaluate", {
+          expression,
           returnByValue: true,
+          awaitPromise: true,
         });
-        const href = loc.result && loc.result.value;
-        if (href && href !== before) break;
-        await new Promise((r) => setTimeout(r, 150));
-      }
-      await new Promise((r) => setTimeout(r, 400));
-      if (!args.inspect) {
-        process.stdout.write(JSON.stringify({ action: fillValue, url: (await session.send("Runtime.evaluate", { expression: "location.href", returnByValue: true })).result.value }, null, 2) + "\n");
+        if (result.exceptionDetails) {
+          throw new Error(result.exceptionDetails.text || "evaluate failed");
+        }
+        process.stdout.write(JSON.stringify(result.result && result.result.value, null, 2) + "\n");
         return;
       }
+
+      const htmlResult = await session.send("Runtime.evaluate", {
+        expression: "document.documentElement.outerHTML",
+        returnByValue: true,
+      });
+      const rawHtml = (htmlResult.result && htmlResult.result.value) || "";
+
+      process.stdout.write(
+        JSON.stringify(
+          {
+            mode: "html_for_inventory",
+            tab,
+            url: tab.url,
+            title: tab.title,
+            raw_html: rawHtml,
+            no_adblock: args.noAdblock,
+          },
+          null,
+          2
+        ) + "\n"
+      );
+    } finally {
+      session.close();
     }
-    if (!args.inspect) return;
-    const extractSrc = fs.readFileSync(path.join(__dirname, "extract_affordances.js"), "utf8");
-    const hidden = args.includeHidden ? "true" : "false";
-    const expression = `${extractSrc}\nextractAffordances({ includeHidden: ${hidden} });`;
-    const result = await session.send("Runtime.evaluate", {
-      expression,
-      returnByValue: true,
-      awaitPromise: true,
-    });
-    if (result.exceptionDetails) {
-      throw new Error(result.exceptionDetails.text || "evaluate failed");
-    }
-    const value = result.result && result.result.value;
-    process.stdout.write(JSON.stringify(value, null, 2) + "\n");
   } finally {
-    session.close();
+    browserSession.close();
   }
 }
 

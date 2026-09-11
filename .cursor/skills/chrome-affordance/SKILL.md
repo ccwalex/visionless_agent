@@ -74,6 +74,15 @@ That polls until `auth.likely` is false or the timeout hits.
 
 Live Chrome (`--cdp`) uses in-page `innerText`, labels, disabled, and visibility (`scripts/extract_affordances.js`). `--html` / `--url` uses a deterministic HTML parser (`scripts/affordances.py`) on dump-dom or saved source.
 
+Fill a mapped field without a mouse:
+
+```bash
+python3 scripts/inspect.py --cdp 9222 \
+  --fill '#ybar-sbq' --value AAPL --submit-form '#ybar-sf' --json
+```
+
+That sets the input with the native value setter, fires `input`/`change`, then `form.requestSubmit()` — not a screenshot click. Re-read the inventory after navigation; selectors can change.
+
 ## Anti-patterns
 
 - Screenshot, click at (x, y), screenshot again

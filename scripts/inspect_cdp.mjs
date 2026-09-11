@@ -14,7 +14,17 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function parseArgs(argv) {
-  const out = { port: 9222, host: "127.0.0.1", target: null, navigate: null, includeHidden: false };
+  const out = {
+    port: 9222,
+    host: "127.0.0.1",
+    target: null,
+    navigate: null,
+    includeHidden: false,
+    fill: null,
+    value: "",
+    submitForm: null,
+    inspect: true,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--port") out.port = Number(argv[++i]);
@@ -22,6 +32,10 @@ function parseArgs(argv) {
     else if (a === "--target") out.target = argv[++i];
     else if (a === "--navigate") out.navigate = argv[++i];
     else if (a === "--include-hidden") out.includeHidden = true;
+    else if (a === "--fill") out.fill = argv[++i];
+    else if (a === "--value") out.value = argv[++i];
+    else if (a === "--submit-form") out.submitForm = argv[++i];
+    else if (a === "--no-inspect") out.inspect = false;
   }
   return out;
 }
@@ -130,6 +144,59 @@ async function main() {
       }
       await new Promise((r) => setTimeout(r, 300));
     }
+    if (args.fill) {
+      const fillExpr = `(() => {
+        const sel = ${JSON.stringify(args.fill)};
+        const value = ${JSON.stringify(args.value)};
+        const formSel = ${JSON.stringify(args.submitForm || "")};
+        const el = document.querySelector(sel);
+        if (!el) return { ok: false, error: "no_element", sel };
+        el.focus();
+        const proto = el instanceof HTMLInputElement
+          ? HTMLInputElement.prototype
+          : HTMLTextAreaElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+        if (setter) setter.call(el, value);
+        else el.value = value;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        if (formSel) {
+          const form = document.querySelector(formSel);
+          if (!form) return { ok: false, error: "no_form", formSel, value: el.value };
+          if (typeof form.requestSubmit === "function") form.requestSubmit();
+          else form.submit();
+        }
+        return { ok: true, filled: sel, value: el.value, url: location.href };
+      })()`;
+      const filled = await session.send("Runtime.evaluate", {
+        expression: fillExpr,
+        returnByValue: true,
+      });
+      if (filled.exceptionDetails) {
+        throw new Error(filled.exceptionDetails.text || "fill evaluate failed");
+      }
+      const fillValue = filled.result && filled.result.value;
+      if (!fillValue || !fillValue.ok) {
+        process.stdout.write(JSON.stringify({ error: "fill_failed", detail: fillValue }, null, 2) + "\n");
+        process.exit(2);
+      }
+      const before = fillValue.url;
+      for (let i = 0; i < 40; i++) {
+        const loc = await session.send("Runtime.evaluate", {
+          expression: "location.href",
+          returnByValue: true,
+        });
+        const href = loc.result && loc.result.value;
+        if (href && href !== before) break;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      await new Promise((r) => setTimeout(r, 400));
+      if (!args.inspect) {
+        process.stdout.write(JSON.stringify({ action: fillValue, url: (await session.send("Runtime.evaluate", { expression: "location.href", returnByValue: true })).result.value }, null, 2) + "\n");
+        return;
+      }
+    }
+    if (!args.inspect) return;
     const extractSrc = fs.readFileSync(path.join(__dirname, "extract_affordances.js"), "utf8");
     const hidden = args.includeHidden ? "true" : "false";
     const expression = `${extractSrc}\nextractAffordances({ includeHidden: ${hidden} });`;

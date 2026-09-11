@@ -85,7 +85,15 @@ def fetch_html(url: str) -> str:
         return resp.read().decode("utf-8", "replace")
 
 
-def cdp_inspect(port: int, navigate: str | None, target: str | None, include_hidden: bool) -> dict:
+def cdp_inspect(
+    port: int,
+    navigate: str | None,
+    target: str | None,
+    include_hidden: bool,
+    fill: str | None = None,
+    value: str | None = None,
+    submit_form: str | None = None,
+) -> dict:
     cmd = [
         "node",
         os.path.join(SCRIPT_DIR, "inspect_cdp.mjs"),
@@ -98,6 +106,10 @@ def cdp_inspect(port: int, navigate: str | None, target: str | None, include_hid
         cmd += ["--target", target]
     if include_hidden:
         cmd.append("--include-hidden")
+    if fill:
+        cmd += ["--fill", fill, "--value", value or ""]
+    if submit_form:
+        cmd += ["--submit-form", submit_form]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
     stdout = proc.stdout.strip()
     stderr = proc.stderr.strip()
@@ -198,7 +210,15 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
         else:
             navigate = None
         while True:
-            inv = cdp_inspect(args.cdp, navigate, args.target or args.url, args.include_hidden)
+            inv = cdp_inspect(
+                args.cdp,
+                navigate,
+                args.target or args.url,
+                args.include_hidden,
+                fill=args.fill,
+                value=args.value,
+                submit_form=args.submit_form,
+            )
             inv = attach_handoff(inv, args)
             if not inv["handoff"]["required"]:
                 return inv, 0
@@ -259,6 +279,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="If login/captcha is detected, poll CDP until it clears or timeout (user completes it in headed Chrome)",
     )
     p.add_argument("--dump-dom", action="store_true", help="Fetch --url via headless Chrome --dump-dom instead of HTTP")
+    p.add_argument("--fill", metavar="SELECTOR", help="With --cdp: set this field's value (native setter + input/change events)")
+    p.add_argument("--value", help="Value for --fill")
+    p.add_argument(
+        "--submit-form",
+        metavar="SELECTOR",
+        help="With --fill: requestSubmit() this form (no mouse click)",
+    )
     p.add_argument("--include-hidden", action="store_true")
     p.add_argument("--ignore-handoff", action="store_true", help="Exit 0 even when login/captcha is present")
     p.add_argument("--json", action="store_true")

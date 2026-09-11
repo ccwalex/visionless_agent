@@ -21,6 +21,9 @@ python3 scripts/inspect.py --url https://example.com --json
 python3 scripts/inspect.py --cdp 9222 --json
 python3 scripts/inspect.py --cdp 9222 --wait-login 180
 
+# Fill a field from the inventory, submit the form (no mouse)
+python3 scripts/inspect.py --cdp 9222 --fill '#ybar-sbq' --value AAPL --submit-form '#ybar-sf' --json
+
 # Optional: headless Chrome dump-dom when HTTP source is a JS shell
 python3 scripts/inspect.py --url https://example.com --dump-dom --json
 ```
@@ -32,6 +35,15 @@ google-chrome --remote-debugging-port=9222
 # macOS:
 # "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
 ```
+
+## Worked example: Yahoo Finance → AAPL
+
+Against a Chrome session (`--remote-debugging-port`):
+
+1. Inspect `https://finance.yahoo.com/` — inventory shows GET form `#ybar-sf` /lookup, field `#ybar-sbq` (`name=p`), submit `#ybar-search`.
+2. Fill via CDP, not a click: `--fill '#ybar-sbq' --value AAPL --submit-form '#ybar-sf'`.
+3. Yahoo navigates to `https://finance.yahoo.com/quote/AAPL/`. Re-inspect; quote tabs (`Summary`, `Chart`, `Financials`, …) are links. Sign-in is present but optional for the quote (`auth.likely` stayed false).
+
 
 ## Agent skill
 

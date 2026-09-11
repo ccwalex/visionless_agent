@@ -78,7 +78,7 @@ function saveRegistry(port, data) {
   fs.writeFileSync(registryPath(port), JSON.stringify(data, null, 2));
 }
 
-function mergeTargets(registry, targets, openerByCdpId = {}) {
+function mergeTargets(registry, targets, openerByCdpId = {}, forcedOpenerByCdpId = {}) {
   const tabs = registry.tabs || (registry.tabs = {});
   let nextIndex = registry.next_index || 0;
   const liveIds = new Set(targets.map((t) => t.id));
@@ -88,7 +88,8 @@ function mergeTargets(registry, targets, openerByCdpId = {}) {
   for (const target of targets) {
     const cdpId = target.id;
     if (!tabs[cdpId]) {
-      const openerCdp = openerByCdpId[cdpId];
+      const openerCdp =
+        forcedOpenerByCdpId[cdpId] || openerByCdpId[cdpId] || null;
       let openerIndex = null;
       if (openerCdp && tabs[openerCdp]) openerIndex = tabs[openerCdp].index;
       tabs[cdpId] = { index: nextIndex++, opener_index: openerIndex };
@@ -230,18 +231,27 @@ async function main() {
     let { page, tab } = pickPage(pages, tabs, args);
 
     if (args.newTab) {
+      const parentCdpId = page.id;
+      const parentTabId = tab.id;
+      const knownBefore = new Set(Object.keys(registry.tabs || {}));
       await browserSession.send("Target.createTarget", {
         url: args.newTab,
         newWindow: false,
         background: false,
-        openerId: page.id,
+        openerId: parentCdpId,
       });
       await new Promise((r) => setTimeout(r, 800));
       pages = await fetchPages(args.host, args.port);
       const openerMap = await getOpenerMap(browserSession, pages);
-      tabs = mergeTargets(registry, pages, openerMap);
+      const forced = {};
+      for (const p of pages) {
+        if (!knownBefore.has(p.id) && p.id !== parentCdpId) {
+          forced[p.id] = parentCdpId;
+        }
+      }
+      tabs = mergeTargets(registry, pages, openerMap, forced);
       saveRegistry(args.port, registry);
-      const child = tabs.filter((t) => t.opened_from === tab.id).sort((a, b) => b.id - a.id)[0];
+      const child = tabs.filter((t) => t.opened_from === parentTabId).sort((a, b) => b.id - a.id)[0];
       if (child) {
         tab = child;
         page = pages.find((p) => p.id === child.cdp_id) || pages[pages.length - 1];

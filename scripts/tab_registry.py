@@ -40,9 +40,11 @@ def merge_targets(
     registry: dict[str, Any],
     targets: list[dict[str, Any]],
     opener_by_cdp_id: dict[str, str | None] | None = None,
+    forced_opener_by_cdp_id: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Assign stable ids to CDP page targets. Mutates registry in place."""
     opener_by_cdp_id = opener_by_cdp_id or {}
+    forced_opener_by_cdp_id = forced_opener_by_cdp_id or {}
     tabs: dict[str, dict[str, Any]] = registry.setdefault("tabs", {})
     next_index = registry.setdefault("next_index", 0)
 
@@ -55,7 +57,7 @@ def merge_targets(
     for target in targets:
         cdp_id = target["id"]
         if cdp_id not in tabs:
-            opener_cdp = opener_by_cdp_id.get(cdp_id)
+            opener_cdp = forced_opener_by_cdp_id.get(cdp_id) or opener_by_cdp_id.get(cdp_id)
             opener_index = None
             if opener_cdp and opener_cdp in tabs:
                 opener_index = tabs[opener_cdp]["index"]

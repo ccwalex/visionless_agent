@@ -9,6 +9,7 @@ from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlparse
 
+SKIP_STRIP_TAGS = {"script", "link", "meta", "noscript", "style", "template"}
 RULES_PATH = os.path.join(os.path.dirname(__file__), "adblock_rules.json")
 
 
@@ -55,6 +56,8 @@ class AdStripParser(HTMLParser):
 
     def _should_remove(self, tag: str, attrs: list[tuple[str, str | None]]) -> tuple[bool, str, str]:
         tag = tag.lower()
+        if tag in SKIP_STRIP_TAGS:
+            return False, "", ""
         ident = " ".join(
             filter(
                 None,

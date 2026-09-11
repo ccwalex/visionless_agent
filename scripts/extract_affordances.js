@@ -1,8 +1,6 @@
 /**
  * In-page extractor. Evaluated inside Chrome (live DOM) so labels, disabled,
  * and visibility come from the rendered tree — not from pixels.
- *
- * Also loadable from Node as: globalThis.extractAffordances
  */
 (function (root) {
   function cssEscape(value) {
@@ -21,6 +19,7 @@
     if (includeHidden) return true;
     if (!el || el.nodeType !== 1) return false;
     if (el.hasAttribute("hidden") || el.getAttribute("aria-hidden") === "true") return false;
+    if (el.getAttribute("data-adblock-hidden") === "true") return false;
     const type = (el.getAttribute("type") || "").toLowerCase();
     if (type === "hidden") return false;
     const st = root.getComputedStyle ? root.getComputedStyle(el) : null;
@@ -61,6 +60,27 @@
         el.getAttribute("title") ||
         ""
     );
+  }
+
+  function roleFor(el) {
+    const role = (el.getAttribute("role") || "").toLowerCase();
+    if (role) return role;
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute("type") || "").toLowerCase();
+    if (tag === "a") return "link";
+    if (tag === "select") return "combobox";
+    if (tag === "textarea") return "textbox";
+    if (tag === "summary") return "disclosure";
+    if (tag === "button") return type === "submit" || type === "" ? "submit" : "button";
+    if (tag === "input") {
+      if (type === "checkbox") return "checkbox";
+      if (type === "radio") return "radio";
+      if (type === "range") return "slider";
+      if (type === "submit" || type === "image") return "submit";
+      if (type === "button" || type === "reset") return "button";
+      return "textbox";
+    }
+    return "button";
   }
 
   function fieldRecord(el) {
@@ -122,6 +142,83 @@
     };
   }
 
+  function shouldHideAd(el, rules) {
+    if (!rules || !el || el.nodeType !== 1) return null;
+    if (el.getAttribute("data-inspect-tab")) return null;
+    const tag = el.tagName.toLowerCase();
+    const id = (el.id || "").toLowerCase();
+    const cls = (el.className || "").toLowerCase();
+    const src = (el.getAttribute("src") || el.getAttribute("href") || "").toLowerCase();
+    const blob = `${id} ${cls} ${src}`;
+
+    const cosmeticIds = rules.cosmetic_ids || [];
+    if (el.id && cosmeticIds.includes(el.id)) {
+      return { reason: "easylist_cosmetic_id", selector_or_host: `#${el.id}` };
+    }
+    const cosmeticClasses = rules.cosmetic_classes || rules.id_class_patterns || [];
+    for (const token of (el.className || "").split(/\s+/)) {
+      if (token && cosmeticClasses.includes(token)) {
+        return { reason: "easylist_cosmetic_class", selector_or_host: `.${token}` };
+      }
+    }
+
+    for (const pat of rules.id_class_patterns || []) {
+      if (blob.includes(pat.toLowerCase())) return { reason: "id_class_pattern", selector_or_host: `${tag}.${pat}` };
+    }
+    for (const host of rules.hosts || []) {
+      if (src.includes(host)) return { reason: "easylist_host", selector_or_host: `${tag}[src~=${host}]` };
+    }
+    for (const pat of rules.tag_patterns || []) {
+      if (pat.tag && pat.tag.toLowerCase() !== tag) continue;
+      if (pat.class_contains && cls.includes(pat.class_contains.toLowerCase()))
+        return { reason: pat.reason || "tag_pattern", selector_or_host: `${tag}.${pat.class_contains}` };
+      if (pat.src_contains && src.includes(pat.src_contains.toLowerCase()))
+        return { reason: pat.reason || "tag_pattern", selector_or_host: `${tag}[src*=${pat.src_contains}]` };
+      const prefix = pat.id_prefix || pat.class_prefix || "";
+      if (pat.id_prefix && id.startsWith(prefix.toLowerCase()))
+        return { reason: pat.reason || "tag_pattern", selector_or_host: `${tag}#${id}` };
+      if (pat.class_prefix && cls.split(/\s+/).some((c) => c.startsWith(prefix.toLowerCase())))
+        return { reason: pat.reason || "tag_pattern", selector_or_host: `${tag}.${cls}` };
+    }
+    return null;
+  }
+
+  function hideAds(doc, rules) {
+    const removed = [];
+    if (!rules) return removed;
+    doc.querySelectorAll("*").forEach((el) => {
+      const hit = shouldHideAd(el, rules);
+      if (hit) {
+        el.setAttribute("data-adblock-hidden", "true");
+        removed.push(hit);
+      }
+    });
+    return removed;
+  }
+
+  function visibleText(doc) {
+    const skip = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "TEMPLATE"]);
+    const parts = [];
+    function walk(node) {
+      if (node.nodeType === 3) {
+        parts.push(node.textContent || "");
+        return;
+      }
+      if (node.nodeType !== 1) return;
+      if (skip.has(node.tagName)) return;
+      if (node.getAttribute("data-adblock-hidden") === "true") return;
+      if (node.getAttribute("data-inspect-tab")) return;
+      const block = new Set(["P", "BR", "TR", "LI", "H1", "H2", "H3", "H4", "H5", "H6", "DIV"]);
+      if (block.has(node.tagName)) parts.push("\n");
+      for (const child of node.childNodes) walk(child);
+    }
+    walk(doc.body || doc.documentElement);
+    return String(parts.join(""))
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
   const LOGIN_RE =
     /\b(log\s*in|sign\s*in|sign\s*on|sign\s*up|create account|continue with (google|apple|github|microsoft)|authenticate|sso)\b/i;
   const SEARCH_RE = /\b(search|find|query|go)\b/i;
@@ -134,6 +231,21 @@
     const body = doc.body || doc.documentElement;
     if (!body) {
       return { error: "no_document" };
+    }
+
+    const adblockRules = options.adblockRules || null;
+    const removed = hideAds(doc, adblockRules);
+    const adblock = {
+      enabled: !!adblockRules,
+      removed_count: removed.length,
+      removed,
+    };
+
+    const controls = [];
+    function addControl(rec, formIndex) {
+      rec.form = formIndex;
+      rec.id = controls.length;
+      controls.push(rec);
     }
 
     const forms = [];
@@ -162,7 +274,21 @@
           return;
         }
         if (!isVisible(el, includeHidden)) return;
-        fields.push(fieldRecord(el));
+        const rec = fieldRecord(el);
+        fields.push(rec);
+        addControl(
+          {
+            role: roleFor(el),
+            tag: rec.tag,
+            selector: rec.selector,
+            name: rec.name,
+            text: rec.label || rec.placeholder,
+            label: rec.label,
+            href: "",
+            disabled: rec.disabled,
+          },
+          index
+        );
       });
       const submits = [];
       form
@@ -172,7 +298,21 @@
         .forEach((el) => {
           formControls.add(el);
           if (!isVisible(el, includeHidden)) return;
-          submits.push(buttonRecord(el));
+          const rec = buttonRecord(el);
+          submits.push(rec);
+          addControl(
+            {
+              role: roleFor(el),
+              tag: el.tagName.toLowerCase(),
+              selector: rec.selector,
+              name: rec.name,
+              text: rec.text,
+              label: rec.text,
+              href: "",
+              disabled: rec.disabled,
+            },
+            index
+          );
         });
       forms.push({
         index,
@@ -192,7 +332,21 @@
     doc.querySelectorAll(buttonSel).forEach((el) => {
       if (formControls.has(el)) return;
       if (!isVisible(el, includeHidden)) return;
-      buttons.push(buttonRecord(el));
+      const rec = buttonRecord(el);
+      buttons.push(rec);
+      addControl(
+        {
+          role: roleFor(el),
+          tag: el.tagName.toLowerCase(),
+          selector: rec.selector,
+          name: rec.name,
+          text: rec.text,
+          label: rec.text,
+          href: rec.href,
+          disabled: rec.disabled,
+        },
+        null
+      );
     });
 
     const loose_fields = [];
@@ -202,7 +356,21 @@
       if (type === "hidden") return;
       if (!isVisible(el, includeHidden)) return;
       if (["submit", "button", "reset", "image"].includes(type)) return;
-      loose_fields.push(fieldRecord(el));
+      const rec = fieldRecord(el);
+      loose_fields.push(rec);
+      addControl(
+        {
+          role: roleFor(el),
+          tag: rec.tag,
+          selector: rec.selector,
+          name: rec.name,
+          text: rec.label || rec.placeholder,
+          label: rec.label,
+          href: "",
+          disabled: rec.disabled,
+        },
+        null
+      );
     });
 
     const links = [];
@@ -212,30 +380,64 @@
       if (!href || href.startsWith("javascript:") || href === "#") return;
       const text = compact(el.innerText || el.getAttribute("aria-label") || "");
       if (!text) return;
-      if (links.length >= 40) return;
-      links.push({
-        text,
-        href,
+      links.push({ text, href, selector: selectorFor(el) });
+      if ((el.getAttribute("role") || "").toLowerCase() !== "button") {
+        addControl(
+          {
+            role: "link",
+            tag: "a",
+            selector: selectorFor(el),
+            name: "",
+            text,
+            label: text,
+            href,
+            disabled: false,
+          },
+          null
+        );
+      }
+    });
+
+    const headings = [];
+    doc.querySelectorAll("h1,h2,h3,h4,h5,h6").forEach((el) => {
+      if (!isVisible(el, includeHidden)) return;
+      const tag = el.tagName.toLowerCase();
+      headings.push({
+        level: parseInt(tag[1], 10),
+        text: compact(el.innerText),
         selector: selectorFor(el),
       });
     });
 
-    const passwordFields = [
-      ...forms.flatMap((f) => f.fields),
-      ...loose_fields,
-    ].filter((f) => f.type === "password");
+    const landmarks = [];
+    doc.querySelectorAll("main,nav,article,aside,header,footer").forEach((el) => {
+      if (el.getAttribute("data-inspect-tab")) return;
+      if (!isVisible(el, includeHidden)) return;
+      landmarks.push({
+        tag: el.tagName.toLowerCase(),
+        selector: selectorFor(el),
+        text: compact(el.innerText),
+      });
+    });
 
-    const loginButtons = [...forms.flatMap((f) => f.submits), ...buttons].filter((b) =>
-      LOGIN_RE.test(b.text)
-    );
+    const media = [];
+    doc.querySelectorAll("img,video").forEach((el) => {
+      if (!isVisible(el, includeHidden)) return;
+      media.push({
+        tag: el.tagName.toLowerCase(),
+        selector: selectorFor(el),
+        alt: el.getAttribute("alt") || "",
+        src: el.getAttribute("src") || "",
+      });
+    });
 
+    const passwordFields = [...forms.flatMap((f) => f.fields), ...loose_fields].filter((f) => f.type === "password");
+    const loginButtons = [...forms.flatMap((f) => f.submits), ...buttons].filter((b) => LOGIN_RE.test(b.text));
     const html = (doc.documentElement && doc.documentElement.outerHTML) || "";
     const captcha =
       CAPTCHA_RE.test(html) || !!doc.querySelector("[data-sitekey], .g-recaptcha, iframe[src*='recaptcha']");
-
     const title = compact(doc.title || "");
     const url = (doc.location && doc.location.href) || "";
-
     const authLikely =
       passwordFields.length > 0 ||
       loginButtons.length > 0 ||
@@ -304,7 +506,7 @@
         summary: `Form ${f.selector || "#" + i} (${f.method.toUpperCase()} ${f.action || "."}) — fill listed fields, activate ${submit ? submit.selector : "submit"}.`,
       });
     });
-    buttons.slice(0, 15).forEach((b, i) => {
+    buttons.forEach((b, i) => {
       if (LOGIN_RE.test(b.text)) return;
       pathways.push({
         id: `button-${i}`,
@@ -315,7 +517,11 @@
       });
     });
 
-    return {
+    const pageText = visibleText(doc);
+    const maxText = options.maxText || 20000;
+    const tab = options.tab || null;
+
+    const out = {
       source: "live-dom",
       url,
       title,
@@ -331,12 +537,23 @@
           captcha ? "captcha" : null,
         ].filter(Boolean),
       },
+      adblock,
+      controls,
       forms,
       buttons,
       loose_fields,
       links,
+      contents: {
+        headings,
+        landmarks,
+        media,
+        text: pageText.slice(0, maxText),
+        text_chars: pageText.length,
+      },
       pathways,
     };
+    if (tab) out.tab = tab;
+    return out;
   }
 
   root.extractAffordances = extractAffordances;

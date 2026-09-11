@@ -1,0 +1,9 @@
+! EasyList sample
+||doubleclick.net^
+||googlesyndication.com^
+@@||cdn.example.com^
+##.adsbygoogle
+##.sponsored-content
+finance.yahoo.com##.stream-item-ad
+##ins.adsbygoogle
+||taboola.com^$third-party

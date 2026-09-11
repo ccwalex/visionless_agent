@@ -7,7 +7,10 @@ agents can choose selectors/pathways without screenshots or mouse coordinates.
   python3 scripts/inspect.py --html tests/fixtures/login.html
   python3 scripts/inspect.py --url https://example.com
   python3 scripts/inspect.py --cdp 9222
-  python3 scripts/inspect.py --cdp 9222 --wait-login
+  python3 scripts/inspect.py --cdp 9222 --list-tabs
+  python3 scripts/inspect.py --cdp 9222 --tab 1
+  python3 scripts/inspect.py --cdp 9222 --new-tab https://example.com
+  python3 scripts/inspect.py --cdp 9222 --close-tab 2
 """
 
 from __future__ import annotations
@@ -24,9 +27,22 @@ import urllib.request
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
+from adblock import load_rules, strip_ads  # noqa: E402
 from affordances import inventory_from_html  # noqa: E402
+from tab_registry import (  # noqa: E402
+    parse_tab_header,
+    prepend_tab_header,
+)
 
 HANDOFF_EXIT = 3
+
+
+def rules_list_sources() -> list[dict[str, str]]:
+    try:
+        rules = load_rules()
+        return rules.get("list_sources") or []
+    except Exception:
+        return []
 
 
 def find_chrome() -> str:
@@ -85,14 +101,21 @@ def fetch_html(url: str) -> str:
         return resp.read().decode("utf-8", "replace")
 
 
-def cdp_inspect(
+def cdp_call(
     port: int,
-    navigate: str | None,
-    target: str | None,
-    include_hidden: bool,
+    *,
+    navigate: str | None = None,
+    target: str | None = None,
+    tab: int | None = None,
+    list_tabs: bool = False,
+    new_tab: str | None = None,
+    close_tab: int | None = None,
+    include_hidden: bool = False,
     fill: str | None = None,
     value: str | None = None,
     submit_form: str | None = None,
+    live_dom: bool = False,
+    no_adblock: bool = False,
 ) -> dict:
     cmd = [
         "node",
@@ -100,6 +123,15 @@ def cdp_inspect(
         "--port",
         str(port),
     ]
+    if list_tabs:
+        cmd.append("--list-tabs")
+    if tab is not None:
+        cmd += ["--tab", str(tab)]
+    if new_tab:
+        cmd += ["--new-tab", new_tab]
+    if close_tab is not None:
+        cmd += ["--close-tab", str(close_tab)]
+        cmd.append("--no-inspect")
     if navigate:
         cmd += ["--navigate", navigate]
     if target:
@@ -110,7 +142,15 @@ def cdp_inspect(
         cmd += ["--fill", fill, "--value", value or ""]
     if submit_form:
         cmd += ["--submit-form", submit_form]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+    if live_dom:
+        cmd.append("--live-dom")
+    if no_adblock:
+        cmd.append("--no-adblock")
+    if list_tabs or (not fill and not new_tab):
+        pass
+    elif fill and not list_tabs:
+        pass
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     stdout = proc.stdout.strip()
     stderr = proc.stderr.strip()
     payload = stdout or stderr
@@ -125,11 +165,60 @@ def cdp_inspect(
     return data
 
 
+def build_inventory(
+    html: str,
+    url: str,
+    *,
+    tab: dict | None = None,
+    no_adblock: bool = False,
+    max_links: int | None = None,
+    max_text: int = 20000,
+    source: str = "html-dump",
+) -> tuple[str, dict]:
+    parsed_tab, body = parse_tab_header(html)
+    tab_meta = tab or parsed_tab or {"id": 0, "opened_from": None, "url": url}
+    if tab and parsed_tab is None:
+        tab_meta = {**tab_meta, "url": tab_meta.get("url") or url}
+
+    adblock_info: dict
+    if no_adblock:
+        adblock_info = {
+            "purpose": "llm_readable_source",
+            "enabled": False,
+            "removed_count": 0,
+            "removed": [],
+        }
+        clean_html = body
+    else:
+        stripped = strip_ads(body, page_url=url)
+        clean_html = stripped["html"]
+        adblock_info = {
+            "purpose": "llm_readable_source",
+            "enabled": True,
+            "removed_count": len(stripped["removed"]),
+            "removed": stripped["removed"],
+            "list_sources": stripped.get("list_sources") or rules_list_sources(),
+        }
+
+    inv = inventory_from_html(
+        clean_html,
+        url=url,
+        tab=tab_meta,
+        adblock=adblock_info,
+        max_links=max_links,
+        max_text=max_text,
+        source=source,
+    )
+    return clean_html, inv
+
+
 def attach_handoff(inv: dict, args: argparse.Namespace) -> dict:
     auth = inv.get("auth") or {}
     needs = bool(auth.get("likely") or auth.get("captcha"))
     resume = ["python3", "scripts/inspect.py", "--cdp", str(args.cdp or 9222), "--json"]
-    if args.url:
+    if args.tab is not None:
+        resume += ["--tab", str(args.tab)]
+    elif args.url:
         resume += ["--target", args.url]
     inv["handoff"] = {
         "required": needs,
@@ -147,8 +236,16 @@ def attach_handoff(inv: dict, args: argparse.Namespace) -> dict:
 
 
 def print_human(inv: dict) -> None:
+    tab = inv.get("tab") or {}
+    if tab:
+        opened = tab.get("opened_from")
+        origin = f" from tab {opened}" if opened is not None else ""
+        print(f"tab: {tab.get('id')}{origin}  url: {tab.get('url') or inv.get('url')}")
     print(f"source: {inv.get('source')}  url: {inv.get('url')}")
     print(f"title: {inv.get('title')}")
+    adblock = inv.get("adblock") or {}
+    if adblock.get("enabled"):
+        print(f"content_clean: removed {adblock.get('removed_count', 0)} ad/noise nodes for LLM reading")
     auth = inv.get("auth") or {}
     print(
         f"auth.likely: {auth.get('likely')}  captcha: {auth.get('captcha')}  "
@@ -158,6 +255,9 @@ def print_human(inv: dict) -> None:
     if handoff.get("required"):
         print("HANDOFF REQUIRED")
         print(f"  {handoff.get('instruction')}")
+    contents = inv.get("contents") or {}
+    print(f"controls: {len(inv.get('controls') or [])}  links: {len(inv.get('links') or [])}")
+    print(f"text_chars: {contents.get('text_chars', 0)}")
     print("pathways:")
     if not inv.get("pathways"):
         print("  (none)")
@@ -192,33 +292,82 @@ def print_human(inv: dict) -> None:
 
 
 def run(args: argparse.Namespace) -> tuple[dict, int]:
+    if args.fetch_adblock_lists:
+        from adblock_fetch import compile_rules
+
+        compile_rules(force_fetch=True, include_optional=args.adblock_include_optional)
+
+    if args.cdp and args.list_tabs:
+        data = cdp_call(args.cdp, list_tabs=True)
+        return data, 0
+
+    if args.cdp and args.close_tab is not None:
+        data = cdp_call(args.cdp, close_tab=args.close_tab)
+        return data, 0
+
     if args.html:
         with open(args.html, encoding="utf-8") as fh:
             html = fh.read()
-        inv = inventory_from_html(html, url=args.url or args.html)
+        _, inv = build_inventory(
+            html,
+            url=args.url or args.html,
+            no_adblock=args.no_adblock,
+            max_links=args.max_links,
+            max_text=args.max_text,
+        )
         inv = attach_handoff(inv, args)
         return inv, HANDOFF_EXIT if inv["handoff"]["required"] and not args.ignore_handoff else 0
 
     if args.cdp:
         deadline = time.time() + args.wait_login if args.wait_login else None
-        navigate = args.navigate or (args.url if args.cdp and args.navigate else None)
-        # Only auto-navigate when explicitly asked; attaching should follow the user's tab.
+        navigate = None
         if args.navigate:
             navigate = args.navigate
         elif args.url and args.force_navigate:
             navigate = args.url
-        else:
-            navigate = None
         while True:
-            inv = cdp_inspect(
+            data = cdp_call(
                 args.cdp,
-                navigate,
-                args.target or args.url,
-                args.include_hidden,
+                navigate=navigate,
+                target=args.target or (None if args.tab is not None else args.url),
+                tab=args.tab,
+                new_tab=args.new_tab,
+                include_hidden=args.include_hidden,
                 fill=args.fill,
                 value=args.value,
                 submit_form=args.submit_form,
+                live_dom=args.live_dom,
+                no_adblock=args.no_adblock,
             )
+            if args.live_dom and data.get("source") == "live-dom":
+                inv = attach_handoff(data, args)
+                return inv, HANDOFF_EXIT if inv["handoff"]["required"] and not args.ignore_handoff else 0
+
+            if data.get("mode") == "html_for_inventory":
+                tab = data.get("tab") or {}
+                url = data.get("url") or tab.get("url") or args.url or ""
+                title = data.get("title") or tab.get("title") or ""
+                raw_html = data.get("raw_html") or ""
+                _, inv = build_inventory(
+                    raw_html,
+                    url=url,
+                    tab=tab,
+                    no_adblock=args.no_adblock or data.get("no_adblock"),
+                    max_links=args.max_links,
+                    max_text=args.max_text,
+                    source="cdp-html",
+                )
+                inv["title"] = inv.get("title") or title
+                if args.save_html:
+                    tab_meta = inv.get("tab") or tab
+                    clean = raw_html if args.no_adblock else strip_ads(raw_html, page_url=url)["html"]
+                    with open(args.save_html, "w", encoding="utf-8") as fh:
+                        fh.write(prepend_tab_header(clean, tab_meta))
+                    inv["saved_html"] = args.save_html
+            else:
+                inv = attach_handoff(data, args)
+                return inv, HANDOFF_EXIT if inv["handoff"]["required"] and not args.ignore_handoff else 0
+
             inv = attach_handoff(inv, args)
             if not inv["handoff"]["required"]:
                 return inv, 0
@@ -233,7 +382,8 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
                 file=sys.stderr,
             )
             time.sleep(3)
-            navigate = None  # do not reload the login page while the user is signing in
+            navigate = None
+            args.new_tab = None
 
     url = args.url
     if not url:
@@ -247,13 +397,22 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
     else:
         html = fetch_html(url)
         source_note = "http"
-    inv = inventory_from_html(html, url=url)
+    _, inv = build_inventory(
+        html,
+        url=url,
+        no_adblock=args.no_adblock,
+        max_links=args.max_links,
+        max_text=args.max_text,
+        source=source_note,
+    )
     inv["fetch"] = source_note
     inv = attach_handoff(inv, args)
     code = HANDOFF_EXIT if inv["handoff"]["required"] and not args.ignore_handoff else 0
     if args.save_html:
+        tab = inv.get("tab") or {"id": 0, "opened_from": None, "url": url}
+        out_html = prepend_tab_header(html if args.no_adblock else strip_ads(html, page_url=url)["html"], tab)
         with open(args.save_html, "w", encoding="utf-8") as fh:
-            fh.write(html)
+            fh.write(out_html)
         inv["saved_html"] = args.save_html
     return inv, code
 
@@ -265,6 +424,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--url", help="Page URL (dump-dom / HTTP) or CDP target hint")
     p.add_argument("--html", help="Inspect a saved HTML file instead of Chrome")
     p.add_argument("--cdp", type=int, metavar="PORT", help="Attach to Chrome remote debugging port")
+    p.add_argument("--list-tabs", action="store_true", help="List all CDP tabs with stable ids")
+    p.add_argument("--tab", type=int, metavar="N", help="Inspect tab N (activates it)")
+    p.add_argument("--new-tab", metavar="URL", help="Open URL in a child tab of --tab (default 0)")
+    p.add_argument("--close-tab", type=int, metavar="N", help="Close tab N in the CDP session")
     p.add_argument("--target", help="Substring match for an existing CDP tab URL/title")
     p.add_argument("--navigate", help="Ask the attached Chrome tab to open this URL first")
     p.add_argument(
@@ -287,6 +450,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --fill: requestSubmit() this form (no mouse click)",
     )
     p.add_argument("--include-hidden", action="store_true")
+    p.add_argument("--live-dom", action="store_true", help="Use live DOM extractor instead of cleaned HTML inventory")
+    p.add_argument("--no-adblock", action="store_true", help="Do not clean ad/noise markup before LLM inventory parse")
+    p.add_argument(
+        "--fetch-adblock-lists",
+        action="store_true",
+        help="Download/update EasyList + EasyPrivacy filter lists used for LLM-readable source cleaning",
+    )
+    p.add_argument(
+        "--adblock-include-optional",
+        action="store_true",
+        help="Also fetch optional lists (e.g. Fanboy's Annoyance)",
+    )
+    p.add_argument("--max-links", type=int, metavar="N", help="Cap link count in inventory (default: no cap)")
+    p.add_argument("--max-text", type=int, default=20000, help="Max visible text chars in contents.text")
     p.add_argument("--ignore-handoff", action="store_true", help="Exit 0 even when login/captcha is present")
     p.add_argument("--json", action="store_true")
     p.add_argument("--save-html", metavar="PATH")
@@ -309,10 +486,21 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(inv, sys.stdout, indent=2)
         sys.stdout.write("\n")
     else:
-        print_human(inv)
-    if args.save_html and args.cdp:
-        # live DOM path has no raw dump unless we add one later
-        pass
+        if args.list_tabs:
+            for tab in inv.get("tabs") or []:
+                opened = tab.get("opened_from")
+                origin = f" from tab {opened}" if opened is not None else ""
+                print(f"tab {tab['id']}{origin}: {tab.get('title')!r} {tab.get('url')}")
+        elif inv.get("action") == "close_tab":
+            closed = inv.get("closed") or {}
+            print(f"closed tab {closed.get('id')}: {closed.get('title')!r} {closed.get('url')}")
+            print("remaining tabs:")
+            for tab in inv.get("tabs") or []:
+                opened = tab.get("opened_from")
+                origin = f" from tab {opened}" if opened is not None else ""
+                print(f"  tab {tab['id']}{origin}: {tab.get('title')!r} {tab.get('url')}")
+        else:
+            print_human(inv)
     return code
 
 

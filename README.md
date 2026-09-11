@@ -69,6 +69,9 @@ python3 scripts/inspect.py --url https://example.com --json
 
 # Follow a tab you already have open (cookies, login, SPA state) — preferred
 python3 scripts/inspect.py --cdp 9222 --json
+python3 scripts/inspect.py --cdp 9222 --list-tabs --json
+python3 scripts/inspect.py --cdp 9222 --tab 1 --json
+python3 scripts/inspect.py --cdp 9222 --tab 0 --new-tab https://example.com --json
 python3 scripts/inspect.py --cdp 9222 --wait-login 180
 
 # Fill a field from the inventory, submit the form (no mouse)
@@ -76,6 +79,11 @@ python3 scripts/inspect.py --cdp 9222 --fill '#ybar-sbq' --value AAPL --submit-f
 
 # Optional: headless Chrome dump-dom when HTTP source is a JS shell
 python3 scripts/inspect.py --url https://example.com --dump-dom --json
+
+# Adblock pulls EasyList + EasyPrivacy (Adblock Plus / Ghostery-compatible syntax)
+python3 scripts/adblock_fetch.py --json
+python3 scripts/inspect.py --fetch-adblock-lists --html tests/fixtures/ads_and_content.html --json
+python3 scripts/inspect.py --url https://example.com --no-adblock --json
 ```
 
 Start headed Chrome so a person can sign in:
@@ -94,6 +102,46 @@ Against a Chrome session (`--remote-debugging-port`):
 2. Fill via CDP, not a click: `--fill '#ybar-sbq' --value AAPL --submit-form '#ybar-sf'`.
 3. Yahoo navigates to `https://finance.yahoo.com/quote/AAPL/`. Re-inspect; quote tabs (`Summary`, `Chart`, `Financials`, …) are links. Sign-in is present but optional for the quote (`auth.likely` stayed false).
 
+## Multi-tab inspect
+
+Each CDP session gets stable integer tab ids (`0`, `1`, …) persisted under `/tmp/visionless-tabs-<port>.json`. When tab 1 is opened from tab 0, the inventory includes:
+
+```json
+"tab": { "id": 1, "opened_from": 0, "url": "...", "title": "...", "cdp_id": "..." }
+```
+
+Saved HTML dumps prepend a self-describing header:
+
+```html
+<header data-inspect-tab="1" data-opened-from="0" data-url="https://example.com/b">
+tab 1 originated from tab 0
+</header>
+```
+
+List tabs, switch, open a child, or close one:
+
+```bash
+python3 scripts/inspect.py --cdp 9222 --list-tabs
+python3 scripts/inspect.py --cdp 9222 --tab 1 --json
+python3 scripts/inspect.py --cdp 9222 --tab 0 --new-tab https://example.com --json
+python3 scripts/inspect.py --cdp 9222 --close-tab 2 --json
+```
+
+## Full inventory
+
+Inspect JSON now includes a complete map (not samples):
+
+| Field | Use |
+|---|---|
+| `controls[]` | Every interactive element with `id`, `role`, `selector`, `text`, `form` |
+| `contents.headings` | `h1`–`h6` text |
+| `contents.landmarks` | `main`, `nav`, `article`, etc. |
+| `contents.media` | `img` / `video` alt and src |
+| `contents.text` | Visible page text (default 20k chars) |
+| `adblock` | Ad/noise nodes removed so `contents.text` and controls are LLM-readable (`purpose: llm_readable_source`) |
+| `pathways` | Ranked suggestions — not the full inventory |
+
+**Content cleaning (not browser blocking):** before parsing, ad/tracker markup is stripped from HTML source using EasyList + EasyPrivacy rules (Adblock Plus mirrors; Ghostery-compatible syntax). This makes `contents.text` and the control map easier for LLMs to read — it does not block live network requests. Cached under `~/.cache/visionless-agent/adblock/` (24h TTL). Use `--fetch-adblock-lists` to refresh; `--no-adblock` to skip cleaning.
 
 ## Agent skill
 
@@ -105,15 +153,23 @@ Against a Chrome session (`--remote-debugging-port`):
 |---|---|
 | `scripts/inspect.py` | CLI |
 | `scripts/affordances.py` | HTML → inventory |
+| `scripts/adblock.py` | Clean HTML source for LLM-readable inventory |
+| `scripts/adblock_fetch.py` | Fetch/cache EasyList + EasyPrivacy |
+| `scripts/adblock_parse.py` | Parse Adblock Plus filter syntax |
+| `scripts/adblock_lists.json` | Remote list URLs |
+| `scripts/adblock_rules.json` | Built-in bootstrap rules |
+| `scripts/tab_registry.py` | Stable tab ids + HTML header |
+| `scripts/html_text.py` | Visible text extraction |
 | `scripts/extract_affordances.js` | Live DOM extractor (evaluated in Chrome) |
-| `scripts/inspect_cdp.mjs` | CDP attach / `Runtime.evaluate` |
-| `tests/fixtures/` | Login + search forms |
+| `scripts/inspect_cdp.mjs` | CDP attach / multi-tab / evaluate |
+| `tests/fixtures/` | Login, search, ads, tab header |
 | `tests/test_affordances.py` | Parser + CLI exit codes |
+| `tests/test_tab_adblock.py` | Tab registry, adblock, full inventory |
 
 Optional leftover from an earlier experiment: `scripts/text_search.py` constructs search URLs when you already know the engine. Prefer inspect + `get_shortcut` on the live form.
 
 ## Tests
 
 ```bash
-python3 -m unittest tests.test_affordances tests.test_parsers -v
+python3 -m unittest tests.test_affordances tests.test_parsers tests.test_tab_adblock -v
 ```

@@ -1,52 +1,57 @@
 # text-browse
 
-A **no-vision** skill and CLI for agents that need to search the web and read pages.
+Deterministic **Chrome DOM inspect** for agents that should not screenshot or aim a mouse.
 
-They construct a results URL (no Search-button click), download HTML or JSON, and parse hits from page source. Screenshots are out of scope.
+Chrome (or saved HTML) is the source of truth. The script prints buttons, form fields, selectors, and ranked pathways — including an explicit **handoff** when the page needs a human login.
 
-## Why this exists
+This is not a text-only browser.
 
-Cloud agents hitting Google often get a JavaScript shell or captcha. Yahoo may 307-loop. DuckDuckGo Lite, the Wikipedia API, and Hacker News Algolia still return usable source from a datacenter IP. If Google is required, run the same script on a residential machine (local Chrome / self-hosted worker) instead of retrying the blocked URL.
-
-## Search (no clicks)
+## Inspect
 
 ```bash
-python3 scripts/text_search.py "cursor agent skills"
-python3 scripts/text_search.py --json --save-html /tmp/serp.html "cursor agent skills"
-python3 scripts/text_search.py --engine wikipedia "lisp"
+# Saved source (fully deterministic; used in tests)
+python3 scripts/inspect.py --html tests/fixtures/search_form.html
+python3 scripts/inspect.py --html tests/fixtures/login.html --json
+# exit code 3 = hand off login to the user
+
+# Load a URL over HTTP and parse source (no Chrome needed)
+python3 scripts/inspect.py --url https://example.com --json
+
+# Follow a tab you already have open (cookies, login, SPA state) — preferred
+python3 scripts/inspect.py --cdp 9222 --json
+python3 scripts/inspect.py --cdp 9222 --wait-login 180
+
+# Optional: headless Chrome dump-dom when HTTP source is a JS shell
+python3 scripts/inspect.py --url https://example.com --dump-dom --json
 ```
 
-Default engine chain: **DuckDuckGo Lite → Wikipedia → Hacker News → Yahoo → Google**.
-
-`--chrome` uses `google-chrome --dump-dom` on the machine where the script runs. Use that on your own computer when Google blocks the cloud IP.
-
-## Inspect any URL from source
+Start headed Chrome so a person can sign in:
 
 ```bash
-python3 scripts/text_browse.py https://example.com
-python3 scripts/text_browse.py https://example.com --json --save-html /tmp/page.html
+google-chrome --remote-debugging-port=9222
+# macOS:
+# "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
 ```
 
 ## Agent skill
 
-Project skill: `.cursor/skills/no-vision-browse/SKILL.md`
+`.cursor/skills/chrome-affordance/SKILL.md` — attach to Chrome, read the inventory, prefer GET shortcuts, never loop on screenshots, hand login back to the user.
 
-Cursor loads it automatically. It tells agents to prefer URL construction, source inspection, and engine fallbacks over vision or UI clicking.
+## Layout
+
+| Path | Role |
+|---|---|
+| `scripts/inspect.py` | CLI |
+| `scripts/affordances.py` | HTML → inventory |
+| `scripts/extract_affordances.js` | Live DOM extractor (evaluated in Chrome) |
+| `scripts/inspect_cdp.mjs` | CDP attach / `Runtime.evaluate` |
+| `tests/fixtures/` | Login + search forms |
+| `tests/test_affordances.py` | Parser + CLI exit codes |
+
+Optional leftover from an earlier experiment: `scripts/text_search.py` constructs search URLs when you already know the engine. Prefer inspect + `get_shortcut` on the live form.
 
 ## Tests
 
 ```bash
-python3 -m unittest tests.test_parsers -v
+python3 -m unittest tests.test_affordances tests.test_parsers -v
 ```
-
-Stdlib only (Python 3.10+). No extra packages.
-
-## Local Google (when the cloud IP is blocked)
-
-On your Mac, with Chrome installed:
-
-```bash
-python3 scripts/text_search.py --chrome --engine google "your query"
-```
-
-Or open Chrome with remote debugging and fetch `https://www.google.com/search?q=…&gbv=1` directly — still no homepage and no Search click.

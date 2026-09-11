@@ -32,6 +32,7 @@ List tabs with stable integer ids and opener lineage:
 python3 scripts/inspect.py --cdp 9222 --list-tabs --json
 python3 scripts/inspect.py --cdp 9222 --tab 0 --json
 python3 scripts/inspect.py --cdp 9222 --tab 0 --new-tab https://example.com --json
+python3 scripts/inspect.py --cdp 9222 --close-tab 2 --json
 ```
 
 Each inventory includes `tab: { id, opened_from, url, title, cdp_id }`. Tab 1 opened from tab 0 shows `"opened_from": 0`. Saved HTML dumps prepend `<header data-inspect-tab="…" data-opened-from="…">` so the source is self-describing.
@@ -85,7 +86,7 @@ That polls until `auth.likely` is false or the timeout hits.
 | `contents.headings` | `h1`–`h6` |
 | `contents.landmarks` | `main`, `nav`, `article`, etc. |
 | `contents.media` | Images and video |
-| `adblock` | Nodes stripped from source (`scripts/adblock_rules.json`) |
+| `adblock` | Ad/noise stripped from **source** for LLM reading (`purpose: llm_readable_source`) — not live request blocking |
 | `forms[].fields[].selector` | Where to type |
 | `forms[].submits[].selector` | Submit control for that form |
 | `pathways[].kind = fill_and_submit` | Ordered fill plan + optional `get_shortcut` |
@@ -93,7 +94,7 @@ That polls until `auth.likely` is false or the timeout hits.
 | `pathways[].kind = handoff` | Stop; give the browser to the human |
 | `buttons` / `links` | Views over `controls` |
 
-Default CDP path dumps HTML, strips ads, and parses with `scripts/affordances.py` (deterministic). Use `--live-dom` for computed visibility via `scripts/extract_affordances.js`. Use `--no-adblock` to skip stripping.
+Default CDP path dumps HTML, cleans ad/noise from source (cached EasyList/EasyPrivacy), then parses with `scripts/affordances.py`. Use `--live-dom` for computed visibility. Use `--fetch-adblock-lists` to refresh cleaning rules; `--no-adblock` to skip.
 
 Fill a mapped field without a mouse:
 

@@ -1,4 +1,8 @@
-"""Deterministic ad stripping from HTML source before inventory parsing."""
+"""Strip ad/tracker markup from HTML source for LLM-readable inventory parsing.
+
+This is not a browser extension and does not block network requests. It removes
+noise from saved/live HTML before affordance and contents extraction.
+"""
 
 from __future__ import annotations
 

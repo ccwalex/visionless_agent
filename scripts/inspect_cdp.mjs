@@ -23,6 +23,7 @@ function parseArgs(argv) {
     listTabs: false,
     tab: null,
     newTab: null,
+    closeTab: null,
     liveDom: false,
     noAdblock: false,
   };
@@ -40,6 +41,7 @@ function parseArgs(argv) {
     else if (a === "--list-tabs") out.listTabs = true;
     else if (a === "--tab") out.tab = Number(argv[++i]);
     else if (a === "--new-tab") out.newTab = argv[++i];
+    else if (a === "--close-tab") out.closeTab = Number(argv[++i]);
     else if (a === "--live-dom") out.liveDom = true;
     else if (a === "--no-adblock") out.noAdblock = true;
   }
@@ -225,6 +227,37 @@ async function main() {
 
     if (args.listTabs) {
       process.stdout.write(JSON.stringify({ tabs }, null, 2) + "\n");
+      return;
+    }
+
+    if (args.closeTab != null && !Number.isNaN(args.closeTab)) {
+      const hit = tabs.find((t) => t.id === args.closeTab);
+      if (!hit) {
+        throw new Error(`tab_not_found: no tab with id ${args.closeTab}`);
+      }
+      if (tabs.length <= 1) {
+        throw new Error("cannot_close_last_tab: at least one tab must remain");
+      }
+      await browserSession.send("Target.closeTarget", { targetId: hit.cdp_id });
+      await new Promise((r) => setTimeout(r, 400));
+      pages = await fetchPages(args.host, args.port);
+      if (!pages.length) {
+        throw new Error("no_tabs_remaining after close");
+      }
+      const openerMap = await getOpenerMap(browserSession, pages);
+      tabs = mergeTargets(registry, pages, openerMap);
+      saveRegistry(args.port, registry);
+      process.stdout.write(
+        JSON.stringify(
+          {
+            action: "close_tab",
+            closed: hit,
+            tabs,
+          },
+          null,
+          2
+        ) + "\n"
+      );
       return;
     }
 

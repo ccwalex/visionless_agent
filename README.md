@@ -118,12 +118,13 @@ tab 1 originated from tab 0
 </header>
 ```
 
-List tabs, switch, or open a child:
+List tabs, switch, open a child, or close one:
 
 ```bash
 python3 scripts/inspect.py --cdp 9222 --list-tabs
 python3 scripts/inspect.py --cdp 9222 --tab 1 --json
 python3 scripts/inspect.py --cdp 9222 --tab 0 --new-tab https://example.com --json
+python3 scripts/inspect.py --cdp 9222 --close-tab 2 --json
 ```
 
 ## Full inventory
@@ -137,10 +138,10 @@ Inspect JSON now includes a complete map (not samples):
 | `contents.landmarks` | `main`, `nav`, `article`, etc. |
 | `contents.media` | `img` / `video` alt and src |
 | `contents.text` | Visible page text (default 20k chars) |
-| `adblock` | Nodes stripped using EasyList/EasyPrivacy (+ built-in bootstrap rules) |
+| `adblock` | Ad/noise nodes removed so `contents.text` and controls are LLM-readable (`purpose: llm_readable_source`) |
 | `pathways` | Ranked suggestions — not the full inventory |
 
-Adblock pulls **EasyList** and **EasyPrivacy** from Adblock Plus mirrors (same syntax Ghostery uses via `@ghostery/adblocker`). Lists are cached under `~/.cache/visionless-agent/adblock/` (24h TTL). Built-in rules in `scripts/adblock_rules.json` are merged as offline bootstrap. Use `--fetch-adblock-lists` to force refresh; `--no-adblock` to skip stripping.
+**Content cleaning (not browser blocking):** before parsing, ad/tracker markup is stripped from HTML source using EasyList + EasyPrivacy rules (Adblock Plus mirrors; Ghostery-compatible syntax). This makes `contents.text` and the control map easier for LLMs to read — it does not block live network requests. Cached under `~/.cache/visionless-agent/adblock/` (24h TTL). Use `--fetch-adblock-lists` to refresh; `--no-adblock` to skip cleaning.
 
 ## Agent skill
 
@@ -152,7 +153,11 @@ Adblock pulls **EasyList** and **EasyPrivacy** from Adblock Plus mirrors (same s
 |---|---|
 | `scripts/inspect.py` | CLI |
 | `scripts/affordances.py` | HTML → inventory |
-| `scripts/adblock.py` | Source ad stripping before parse |
+| `scripts/adblock.py` | Clean HTML source for LLM-readable inventory |
+| `scripts/adblock_fetch.py` | Fetch/cache EasyList + EasyPrivacy |
+| `scripts/adblock_parse.py` | Parse Adblock Plus filter syntax |
+| `scripts/adblock_lists.json` | Remote list URLs |
+| `scripts/adblock_rules.json` | Built-in bootstrap rules |
 | `scripts/tab_registry.py` | Stable tab ids + HTML header |
 | `scripts/html_text.py` | Visible text extraction |
 | `scripts/extract_affordances.js` | Live DOM extractor (evaluated in Chrome) |

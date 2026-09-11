@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import unittest
 
@@ -112,10 +113,22 @@ class FullInventoryTests(unittest.TestCase):
         inv = inventory_from_html(
             stripped["html"],
             url="https://article.test/",
-            adblock={"enabled": True, "removed_count": len(stripped["removed"]), "removed": stripped["removed"]},
+            adblock={"purpose": "llm_readable_source", "enabled": True, "removed_count": len(stripped["removed"]), "removed": stripped["removed"]},
         )
+        self.assertEqual(inv["adblock"]["purpose"], "llm_readable_source")
         self.assertTrue(inv["adblock"]["enabled"])
         self.assertGreater(inv["adblock"]["removed_count"], 0)
+
+
+class CliTabTests(unittest.TestCase):
+    def test_close_tab_flag_in_help(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "inspect.py"), "--help"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("--close-tab", proc.stdout)
 
 
 if __name__ == "__main__":

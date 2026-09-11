@@ -10,6 +10,7 @@ agents can choose selectors/pathways without screenshots or mouse coordinates.
   python3 scripts/inspect.py --cdp 9222 --list-tabs
   python3 scripts/inspect.py --cdp 9222 --tab 1
   python3 scripts/inspect.py --cdp 9222 --new-tab https://example.com
+  python3 scripts/inspect.py --cdp 9222 --close-tab 2
 """
 
 from __future__ import annotations
@@ -108,6 +109,7 @@ def cdp_call(
     tab: int | None = None,
     list_tabs: bool = False,
     new_tab: str | None = None,
+    close_tab: int | None = None,
     include_hidden: bool = False,
     fill: str | None = None,
     value: str | None = None,
@@ -127,6 +129,9 @@ def cdp_call(
         cmd += ["--tab", str(tab)]
     if new_tab:
         cmd += ["--new-tab", new_tab]
+    if close_tab is not None:
+        cmd += ["--close-tab", str(close_tab)]
+        cmd.append("--no-inspect")
     if navigate:
         cmd += ["--navigate", navigate]
     if target:
@@ -177,12 +182,18 @@ def build_inventory(
 
     adblock_info: dict
     if no_adblock:
-        adblock_info = {"enabled": False, "removed_count": 0, "removed": []}
+        adblock_info = {
+            "purpose": "llm_readable_source",
+            "enabled": False,
+            "removed_count": 0,
+            "removed": [],
+        }
         clean_html = body
     else:
         stripped = strip_ads(body, page_url=url)
         clean_html = stripped["html"]
         adblock_info = {
+            "purpose": "llm_readable_source",
             "enabled": True,
             "removed_count": len(stripped["removed"]),
             "removed": stripped["removed"],
@@ -234,7 +245,7 @@ def print_human(inv: dict) -> None:
     print(f"title: {inv.get('title')}")
     adblock = inv.get("adblock") or {}
     if adblock.get("enabled"):
-        print(f"adblock: removed {adblock.get('removed_count', 0)} nodes")
+        print(f"content_clean: removed {adblock.get('removed_count', 0)} ad/noise nodes for LLM reading")
     auth = inv.get("auth") or {}
     print(
         f"auth.likely: {auth.get('likely')}  captcha: {auth.get('captcha')}  "
@@ -288,6 +299,10 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
 
     if args.cdp and args.list_tabs:
         data = cdp_call(args.cdp, list_tabs=True)
+        return data, 0
+
+    if args.cdp and args.close_tab is not None:
+        data = cdp_call(args.cdp, close_tab=args.close_tab)
         return data, 0
 
     if args.html:
@@ -412,6 +427,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list-tabs", action="store_true", help="List all CDP tabs with stable ids")
     p.add_argument("--tab", type=int, metavar="N", help="Inspect tab N (activates it)")
     p.add_argument("--new-tab", metavar="URL", help="Open URL in a child tab of --tab (default 0)")
+    p.add_argument("--close-tab", type=int, metavar="N", help="Close tab N in the CDP session")
     p.add_argument("--target", help="Substring match for an existing CDP tab URL/title")
     p.add_argument("--navigate", help="Ask the attached Chrome tab to open this URL first")
     p.add_argument(
@@ -435,11 +451,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--include-hidden", action="store_true")
     p.add_argument("--live-dom", action="store_true", help="Use live DOM extractor instead of cleaned HTML inventory")
-    p.add_argument("--no-adblock", action="store_true", help="Do not strip ad markup before inventory")
+    p.add_argument("--no-adblock", action="store_true", help="Do not clean ad/noise markup before LLM inventory parse")
     p.add_argument(
         "--fetch-adblock-lists",
         action="store_true",
-        help="Download/update EasyList + EasyPrivacy (Adblock Plus / Ghostery-compatible) before inspect",
+        help="Download/update EasyList + EasyPrivacy filter lists used for LLM-readable source cleaning",
     )
     p.add_argument(
         "--adblock-include-optional",
@@ -475,6 +491,14 @@ def main(argv: list[str] | None = None) -> int:
                 opened = tab.get("opened_from")
                 origin = f" from tab {opened}" if opened is not None else ""
                 print(f"tab {tab['id']}{origin}: {tab.get('title')!r} {tab.get('url')}")
+        elif inv.get("action") == "close_tab":
+            closed = inv.get("closed") or {}
+            print(f"closed tab {closed.get('id')}: {closed.get('title')!r} {closed.get('url')}")
+            print("remaining tabs:")
+            for tab in inv.get("tabs") or []:
+                opened = tab.get("opened_from")
+                origin = f" from tab {opened}" if opened is not None else ""
+                print(f"  tab {tab['id']}{origin}: {tab.get('title')!r} {tab.get('url')}")
         else:
             print_human(inv)
     return code

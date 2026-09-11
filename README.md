@@ -1,10 +1,45 @@
-# text-browse
+# visionless_agent
 
 Deterministic **Chrome DOM inspect** for agents that should not screenshot or aim a mouse.
 
 Chrome (or saved HTML) is the source of truth. The script prints buttons, form fields, selectors, and ranked pathways — including an explicit **handoff** when the page needs a human login.
 
 This is not a text-only browser.
+
+## Clone / create repo
+
+From your machine (cloud agents cannot create repos in your namespace):
+
+```bash
+# Install the Origin CLI
+curl -fsSL https://downloads.cursor.com/origin/install.sh | sh
+origin auth login
+
+# Create the repo (Origin — Cursor's git hosting)
+origin repo create visionless_agent
+
+# Clone empty repo, or add remote to an existing checkout
+origin repo clone chiu-wang-chau/visionless_agent
+cd visionless_agent
+```
+
+Or on **GitHub** directly:
+
+```bash
+gh auth login
+gh repo create visionless_agent --public --description "Chrome affordance inspect for visionless agents"
+git clone git@github.com:YOUR_USER/visionless_agent.git
+cd visionless_agent
+```
+
+If `origin` is not found after install:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Origin CLI docs: https://cursor.com/docs/origin/cli
 
 ## Inspect
 

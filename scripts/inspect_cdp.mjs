@@ -360,7 +360,15 @@ async function main() {
 
       if (args.liveDom) {
         const extractSrc = fs.readFileSync(path.join(__dirname, "extract_affordances.js"), "utf8");
-        const rulesSrc = fs.readFileSync(path.join(__dirname, "adblock_rules.json"), "utf8");
+        const compiledPath = path.join(
+          process.env.VISIONLESS_ADBLOCK_CACHE ||
+            path.join(process.env.HOME || "/tmp", ".cache", "visionless-agent", "adblock"),
+          "compiled.json"
+        );
+        const rulesPath = fs.existsSync(compiledPath)
+          ? compiledPath
+          : path.join(__dirname, "adblock_rules.json");
+        const rulesSrc = fs.readFileSync(rulesPath, "utf8");
         const hidden = args.includeHidden ? "true" : "false";
         const noAdblock = args.noAdblock ? "true" : "false";
         const expression = `${extractSrc}\nextractAffordances({ includeHidden: ${hidden}, adblockRules: ${noAdblock ? "null" : rulesSrc}, tab: ${JSON.stringify(tab)} });`;

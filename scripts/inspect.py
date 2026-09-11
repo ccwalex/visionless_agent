@@ -26,7 +26,7 @@ import urllib.request
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
-from adblock import strip_ads  # noqa: E402
+from adblock import load_rules, strip_ads  # noqa: E402
 from affordances import inventory_from_html  # noqa: E402
 from tab_registry import (  # noqa: E402
     parse_tab_header,
@@ -34,6 +34,14 @@ from tab_registry import (  # noqa: E402
 )
 
 HANDOFF_EXIT = 3
+
+
+def rules_list_sources() -> list[dict[str, str]]:
+    try:
+        rules = load_rules()
+        return rules.get("list_sources") or []
+    except Exception:
+        return []
 
 
 def find_chrome() -> str:
@@ -172,12 +180,13 @@ def build_inventory(
         adblock_info = {"enabled": False, "removed_count": 0, "removed": []}
         clean_html = body
     else:
-        stripped = strip_ads(body)
+        stripped = strip_ads(body, page_url=url)
         clean_html = stripped["html"]
         adblock_info = {
             "enabled": True,
             "removed_count": len(stripped["removed"]),
             "removed": stripped["removed"],
+            "list_sources": stripped.get("list_sources") or rules_list_sources(),
         }
 
     inv = inventory_from_html(
@@ -272,6 +281,11 @@ def print_human(inv: dict) -> None:
 
 
 def run(args: argparse.Namespace) -> tuple[dict, int]:
+    if args.fetch_adblock_lists:
+        from adblock_fetch import compile_rules
+
+        compile_rules(force_fetch=True, include_optional=args.adblock_include_optional)
+
     if args.cdp and args.list_tabs:
         data = cdp_call(args.cdp, list_tabs=True)
         return data, 0
@@ -331,7 +345,7 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
                 inv["title"] = inv.get("title") or title
                 if args.save_html:
                     tab_meta = inv.get("tab") or tab
-                    clean = raw_html if args.no_adblock else strip_ads(raw_html)["html"]
+                    clean = raw_html if args.no_adblock else strip_ads(raw_html, page_url=url)["html"]
                     with open(args.save_html, "w", encoding="utf-8") as fh:
                         fh.write(prepend_tab_header(clean, tab_meta))
                     inv["saved_html"] = args.save_html
@@ -381,7 +395,7 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
     code = HANDOFF_EXIT if inv["handoff"]["required"] and not args.ignore_handoff else 0
     if args.save_html:
         tab = inv.get("tab") or {"id": 0, "opened_from": None, "url": url}
-        out_html = prepend_tab_header(html if args.no_adblock else strip_ads(html)["html"], tab)
+        out_html = prepend_tab_header(html if args.no_adblock else strip_ads(html, page_url=url)["html"], tab)
         with open(args.save_html, "w", encoding="utf-8") as fh:
             fh.write(out_html)
         inv["saved_html"] = args.save_html
@@ -422,6 +436,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--include-hidden", action="store_true")
     p.add_argument("--live-dom", action="store_true", help="Use live DOM extractor instead of cleaned HTML inventory")
     p.add_argument("--no-adblock", action="store_true", help="Do not strip ad markup before inventory")
+    p.add_argument(
+        "--fetch-adblock-lists",
+        action="store_true",
+        help="Download/update EasyList + EasyPrivacy (Adblock Plus / Ghostery-compatible) before inspect",
+    )
+    p.add_argument(
+        "--adblock-include-optional",
+        action="store_true",
+        help="Also fetch optional lists (e.g. Fanboy's Annoyance)",
+    )
     p.add_argument("--max-links", type=int, metavar="N", help="Cap link count in inventory (default: no cap)")
     p.add_argument("--max-text", type=int, default=20000, help="Max visible text chars in contents.text")
     p.add_argument("--ignore-handoff", action="store_true", help="Exit 0 even when login/captcha is present")

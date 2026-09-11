@@ -14,8 +14,17 @@ RULES_PATH = os.path.join(os.path.dirname(__file__), "adblock_rules.json")
 
 
 def load_rules(path: str | None = None) -> dict[str, Any]:
-    with open(path or RULES_PATH, encoding="utf-8") as fh:
-        return json.load(fh)
+    """Load compiled remote-list rules, falling back to built-in JSON."""
+    if path:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    try:
+        from adblock_fetch import ensure_compiled_rules
+
+        return ensure_compiled_rules()
+    except Exception:
+        with open(RULES_PATH, encoding="utf-8") as fh:
+            return json.load(fh)
 
 
 def _attr(attrs: list[tuple[str, str | None]], name: str) -> str:
@@ -26,14 +35,27 @@ def _attr(attrs: list[tuple[str, str | None]], name: str) -> str:
     return ""
 
 
-def _host_match(url: str, hosts: list[str]) -> str | None:
-    if not url:
+def _page_host(page_url: str) -> str:
+    if not page_url:
+        return ""
+    parsed = urlparse(page_url if "://" in page_url else f"https://{page_url}")
+    return (parsed.netloc or "").lower()
+
+
+def _host_suffix_match(url: str, hosts: set[str]) -> str | None:
+    if not url or not hosts:
         return None
     parsed = urlparse(url if "://" in url else f"https://{url}")
-    host = (parsed.netloc or parsed.path or "").lower()
-    for needle in hosts:
-        if needle in host or host.endswith(needle):
-            return needle
+    host = (parsed.netloc or "").lower()
+    if not host:
+        return None
+    parts = host.split(".")
+    for i in range(len(parts) - 1):
+        suffix = ".".join(parts[i:])
+        if suffix in hosts:
+            return suffix
+    if host in hosts:
+        return host
     return None
 
 
@@ -45,10 +67,28 @@ def _id_class_match(ident: str, patterns: list[str]) -> str | None:
     return None
 
 
+def _cosmetic_sets(rules: dict[str, Any], page_url: str) -> tuple[set[str], set[str]]:
+    classes = set(rules.get("cosmetic_classes") or rules.get("id_class_patterns") or [])
+    ids = set(rules.get("cosmetic_ids") or [])
+    host = _page_host(page_url)
+    if host:
+        for dom, cls_list in (rules.get("domain_cosmetic_classes") or {}).items():
+            if host == dom or host.endswith("." + dom):
+                classes.update(cls_list)
+        for dom, id_list in (rules.get("domain_cosmetic_ids") or {}).items():
+            if host == dom or host.endswith("." + dom):
+                ids.update(id_list)
+    return classes, ids
+
+
 class AdStripParser(HTMLParser):
-    def __init__(self, rules: dict[str, Any]) -> None:
+    def __init__(self, rules: dict[str, Any], page_url: str = "") -> None:
         super().__init__(convert_charrefs=True)
         self.rules = rules
+        self.page_url = page_url
+        self.cosmetic_classes, self.cosmetic_ids = _cosmetic_sets(rules, page_url)
+        self.blocked_hosts = set(rules.get("hosts") or [])
+        self.exception_hosts = set(rules.get("exception_hosts") or [])
         self.removed: list[dict[str, str]] = []
         self._skip_depth = 0
         self._skip_tag: str | None = None
@@ -58,33 +98,35 @@ class AdStripParser(HTMLParser):
         tag = tag.lower()
         if tag in SKIP_STRIP_TAGS:
             return False, "", ""
-        ident = " ".join(
-            filter(
-                None,
-                [
-                    _attr(attrs, "id"),
-                    _attr(attrs, "class"),
-                    _attr(attrs, "src"),
-                    _attr(attrs, "href"),
-                ],
-            )
-        )
+
+        ident_id = _attr(attrs, "id")
+        ident_class = _attr(attrs, "class")
+        src = _attr(attrs, "src") or _attr(attrs, "href")
+
+        if ident_id and ident_id in self.cosmetic_ids:
+            return True, "easylist_cosmetic_id", f"{tag}#{ident_id}"
+
+        for cls_token in ident_class.split():
+            if cls_token in self.cosmetic_classes:
+                return True, "easylist_cosmetic_class", f"{tag}.{cls_token}"
+
+        ident = " ".join(filter(None, [ident_id, ident_class, src]))
         hit = _id_class_match(ident, self.rules.get("id_class_patterns") or [])
         if hit:
-            sel = _attr(attrs, "id") or _attr(attrs, "class") or tag
+            sel = ident_id or ident_class or tag
             return True, "id_class_pattern", f"{tag}.{hit} ({sel})"
 
-        src = _attr(attrs, "src") or _attr(attrs, "href")
-        host = _host_match(src, self.rules.get("hosts") or [])
-        if host:
-            return True, "host", f"{tag}[src~={host}]"
+        exception_hosts = self.exception_hosts
+        host = _host_suffix_match(src, self.blocked_hosts)
+        if host and host not in exception_hosts:
+            return True, "easylist_host", f"{tag}[src~={host}]"
 
         for pat in self.rules.get("tag_patterns") or []:
             want_tag = (pat.get("tag") or "").lower()
             if want_tag and want_tag != tag:
                 continue
-            cls = _attr(attrs, "class").lower()
-            ident_id = _attr(attrs, "id").lower()
+            cls = ident_class.lower()
+            ident_id_l = ident_id.lower()
             src_l = src.lower()
             if pat.get("class_contains") and pat["class_contains"].lower() in cls:
                 return True, pat.get("reason") or "tag_pattern", f"{tag}.{pat['class_contains']}"
@@ -92,8 +134,8 @@ class AdStripParser(HTMLParser):
                 return True, pat.get("reason") or "tag_pattern", f"{tag}[src*={pat['src_contains']}]"
             prefix = pat.get("id_prefix") or pat.get("class_prefix") or ""
             if prefix:
-                if pat.get("id_prefix") and ident_id.startswith(prefix.lower()):
-                    return True, pat.get("reason") or "tag_pattern", f"{tag}#{ident_id}"
+                if pat.get("id_prefix") and ident_id_l.startswith(prefix.lower()):
+                    return True, pat.get("reason") or "tag_pattern", f"{tag}#{ident_id_l}"
                 if pat.get("class_prefix") and any(
                     c.startswith(prefix.lower()) for c in cls.split()
                 ):
@@ -157,12 +199,20 @@ class AdStripParser(HTMLParser):
         return "".join(self.parts)
 
 
-def strip_ads(html: str, rules: dict[str, Any] | None = None) -> dict[str, Any]:
+def strip_ads(
+    html: str,
+    rules: dict[str, Any] | None = None,
+    *,
+    page_url: str = "",
+) -> dict[str, Any]:
     rules = rules or load_rules()
-    parser = AdStripParser(rules)
+    parser = AdStripParser(rules, page_url=page_url)
     parser.feed(html)
     parser.close()
-    return {
+    out = {
         "html": parser.get_html(),
         "removed": parser.removed,
     }
+    if rules.get("list_sources"):
+        out["list_sources"] = rules.get("list_sources")
+    return out

@@ -10,6 +10,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 from adblock import strip_ads  # noqa: E402
+from adblock_parse import merge_parsed, parse_filter_list  # noqa: E402
 from affordances import inventory_from_html  # noqa: E402
 from tab_registry import (  # noqa: E402
     merge_targets,
@@ -60,6 +61,16 @@ class TabRegistryTests(unittest.TestCase):
 
 
 class AdblockTests(unittest.TestCase):
+    def test_parse_easylist_sample(self) -> None:
+        sample = fixture("easylist_sample.txt")
+        parsed = parse_filter_list(sample, source_id="sample")
+        self.assertIn("doubleclick.net", parsed["hosts"])
+        self.assertIn("googlesyndication.com", parsed["hosts"])
+        self.assertIn("cdn.example.com", parsed["exception_hosts"])
+        self.assertIn("adsbygoogle", parsed["cosmetic_classes"])
+        merged = merge_parsed(parsed)
+        self.assertNotIn("cdn.example.com", merged["hosts"])
+
     def test_strip_ads_removes_known_markers(self) -> None:
         html = fixture("ads_and_content.html")
         result = strip_ads(html)

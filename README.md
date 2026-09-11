@@ -80,8 +80,9 @@ python3 scripts/inspect.py --cdp 9222 --fill '#ybar-sbq' --value AAPL --submit-f
 # Optional: headless Chrome dump-dom when HTTP source is a JS shell
 python3 scripts/inspect.py --url https://example.com --dump-dom --json
 
-# Adblock is on by default (readable rules in scripts/adblock_rules.json)
-python3 scripts/inspect.py --html tests/fixtures/ads_and_content.html --json
+# Adblock pulls EasyList + EasyPrivacy (Adblock Plus / Ghostery-compatible syntax)
+python3 scripts/adblock_fetch.py --json
+python3 scripts/inspect.py --fetch-adblock-lists --html tests/fixtures/ads_and_content.html --json
 python3 scripts/inspect.py --url https://example.com --no-adblock --json
 ```
 
@@ -136,10 +137,10 @@ Inspect JSON now includes a complete map (not samples):
 | `contents.landmarks` | `main`, `nav`, `article`, etc. |
 | `contents.media` | `img` / `video` alt and src |
 | `contents.text` | Visible page text (default 20k chars) |
-| `adblock` | What was stripped from source before parsing |
+| `adblock` | Nodes stripped using EasyList/EasyPrivacy (+ built-in bootstrap rules) |
 | `pathways` | Ranked suggestions — not the full inventory |
 
-Adblock rules live in `scripts/adblock_rules.json` (readable, deterministic — not EasyList). Use `--no-adblock` to skip stripping.
+Adblock pulls **EasyList** and **EasyPrivacy** from Adblock Plus mirrors (same syntax Ghostery uses via `@ghostery/adblocker`). Lists are cached under `~/.cache/visionless-agent/adblock/` (24h TTL). Built-in rules in `scripts/adblock_rules.json` are merged as offline bootstrap. Use `--fetch-adblock-lists` to force refresh; `--no-adblock` to skip stripping.
 
 ## Agent skill
 
@@ -152,7 +153,6 @@ Adblock rules live in `scripts/adblock_rules.json` (readable, deterministic — 
 | `scripts/inspect.py` | CLI |
 | `scripts/affordances.py` | HTML → inventory |
 | `scripts/adblock.py` | Source ad stripping before parse |
-| `scripts/adblock_rules.json` | Readable ad/tracker rules |
 | `scripts/tab_registry.py` | Stable tab ids + HTML header |
 | `scripts/html_text.py` | Visible text extraction |
 | `scripts/extract_affordances.js` | Live DOM extractor (evaluated in Chrome) |

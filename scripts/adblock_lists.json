@@ -1,0 +1,29 @@
+{
+  "_comment": "Remote filter lists (EasyList / Adblock Plus syntax, Ghostery-compatible).",
+  "cache_ttl_hours": 24,
+  "sources": [
+    {
+      "id": "easylist",
+      "name": "EasyList (Adblock Plus default)",
+      "url": "https://easylist-downloads.adblockplus.org/easylist.txt",
+      "homepage": "https://easylist.to/",
+      "license": "GPL-3.0"
+    },
+    {
+      "id": "easyprivacy",
+      "name": "EasyPrivacy (Adblock Plus tracking protection)",
+      "url": "https://easylist-downloads.adblockplus.org/easyprivacy.txt",
+      "homepage": "https://easylist.to/",
+      "license": "GPL-3.0"
+    },
+    {
+      "id": "abp_annoyances",
+      "name": "Fanboy's Annoyance (Adblock Plus optional)",
+      "url": "https://easylist-downloads.adblockplus.org/fanboy-annoyance.txt",
+      "homepage": "https://easylist.to/",
+      "license": "GPL-3.0",
+      "optional": true
+    }
+  ],
+  "ghostery_note": "Ghostery uses the same EasyList-compatible filter syntax via @ghostery/adblocker; subscribe to EasyList + EasyPrivacy as Ghostery does for remote lists."
+}

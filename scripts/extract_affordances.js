@@ -150,11 +150,23 @@
     const cls = (el.className || "").toLowerCase();
     const src = (el.getAttribute("src") || el.getAttribute("href") || "").toLowerCase();
     const blob = `${id} ${cls} ${src}`;
+
+    const cosmeticIds = rules.cosmetic_ids || [];
+    if (el.id && cosmeticIds.includes(el.id)) {
+      return { reason: "easylist_cosmetic_id", selector_or_host: `#${el.id}` };
+    }
+    const cosmeticClasses = rules.cosmetic_classes || rules.id_class_patterns || [];
+    for (const token of (el.className || "").split(/\s+/)) {
+      if (token && cosmeticClasses.includes(token)) {
+        return { reason: "easylist_cosmetic_class", selector_or_host: `.${token}` };
+      }
+    }
+
     for (const pat of rules.id_class_patterns || []) {
       if (blob.includes(pat.toLowerCase())) return { reason: "id_class_pattern", selector_or_host: `${tag}.${pat}` };
     }
     for (const host of rules.hosts || []) {
-      if (src.includes(host)) return { reason: "host", selector_or_host: `${tag}[src~=${host}]` };
+      if (src.includes(host)) return { reason: "easylist_host", selector_or_host: `${tag}[src~=${host}]` };
     }
     for (const pat of rules.tag_patterns || []) {
       if (pat.tag && pat.tag.toLowerCase() !== tag) continue;

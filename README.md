@@ -23,14 +23,29 @@ origin repo clone chiu-wang-chau/visionless_agent
 cd visionless_agent
 ```
 
-Or on **GitHub** directly:
+Or on **GitHub** (Option B — run on your Mac):
+
+```bash
+# One-time GitHub CLI login
+gh auth login
+
+# From this repo root — creates github.com/<you>/visionless_agent and pushes main
+bash scripts/push_to_github.sh
+```
+
+Manual steps if you prefer:
 
 ```bash
 gh auth login
-gh repo create visionless_agent --public --description "Chrome affordance inspect for visionless agents"
-git clone git@github.com:YOUR_USER/visionless_agent.git
-cd visionless_agent
+gh repo create visionless_agent --public \
+  --description "Chrome affordance inspect for visionless agents"
+
+cd /path/to/this/project
+git remote add github git@github.com:YOUR_GITHUB_USER/visionless_agent.git
+git push -u github main
 ```
+
+Browse URL after push: `https://github.com/YOUR_GITHUB_USER/visionless_agent`
 
 If `origin` is not found after install:
 

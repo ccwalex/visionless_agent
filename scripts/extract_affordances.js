@@ -10,17 +10,36 @@
     return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
   }
 
-  function compact(text) {
+  function compact(text, limit) {
+    limit = limit == null ? 240 : limit;
     return String(text || "")
       .replace(/\s+/g, " ")
       .trim()
-      .slice(0, 240);
+      .slice(0, limit);
+  }
+
+  function isHiddenAncestor(el) {
+    let n = el;
+    while (n && n.nodeType === 1) {
+      if (n.hasAttribute("hidden") || n.getAttribute("aria-hidden") === "true") return true;
+      n = n.parentElement;
+    }
+    return false;
+  }
+
+  function isOffCanvas(el) {
+    if (!el.getBoundingClientRect) return false;
+    const r = el.getBoundingClientRect();
+    const vw = root.innerWidth || (root.document && root.document.documentElement && root.document.documentElement.clientWidth) || 0;
+    if (r.right < 0 || r.bottom < 0) return true;
+    if (vw && r.left > vw) return true;
+    return false;
   }
 
   function isVisible(el, includeHidden) {
     if (includeHidden) return true;
     if (!el || el.nodeType !== 1) return false;
-    if (el.hasAttribute("hidden") || el.getAttribute("aria-hidden") === "true") return false;
+    if (isHiddenAncestor(el)) return false;
     const type = (el.getAttribute("type") || "").toLowerCase();
     if (type === "hidden") return false;
     const st = root.getComputedStyle ? root.getComputedStyle(el) : null;
@@ -29,7 +48,9 @@
       if (parseFloat(st.opacity || "1") === 0) return false;
     }
     const r = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 1, height: 1 };
-    return r.width > 0 || r.height > 0;
+    if (!(r.width > 0 || r.height > 0)) return false;
+    if (isOffCanvas(el)) return false;
+    return true;
   }
 
   function selectorFor(el) {
@@ -126,6 +147,19 @@
     /\b(log\s*in|sign\s*in|sign\s*on|sign\s*up|create account|continue with (google|apple|github|microsoft)|authenticate|sso)\b/i;
   const SEARCH_RE = /\b(search|find|query|go)\b/i;
   const CAPTCHA_RE = /recaptcha|h-captcha|cf-turnstile|captcha/i;
+  const BUTTON_CHROME_RE =
+    /cookie|consent|accept all|reject all|agree (and|&)|manage (cookies|preferences)|do not sell|privacy settings|subscribe|newsletter|skip to( main)? content|\bclose\b|\bdismiss\b|\bmenu\b|hamburger|notifications?|\bshare\b|get \w+ plus|\badvertis/i;
+  const LINK_CHROME_RE =
+    /cookie|consent|skip to( main)? content|facebook\.com|twitter\.com|(^|\/)x\.com|instagram\.|pinterest\.|tiktok\.|whatsapp/i;
+  const ACTIVATE_PATHWAY_CAP = 5;
+
+  function isChromeButton(rec) {
+    return BUTTON_CHROME_RE.test([rec.text, rec.id, rec.selector, rec.name, rec.href].join(" "));
+  }
+
+  function isChromeLink(rec) {
+    return LINK_CHROME_RE.test([rec.text, rec.href, rec.selector].join(" "));
+  }
 
   function extractAffordances(options) {
     options = options || {};
@@ -192,7 +226,9 @@
     doc.querySelectorAll(buttonSel).forEach((el) => {
       if (formControls.has(el)) return;
       if (!isVisible(el, includeHidden)) return;
-      buttons.push(buttonRecord(el));
+      const rec = buttonRecord(el);
+      rec.chrome = isChromeButton(rec);
+      buttons.push(rec);
     });
 
     const loose_fields = [];
@@ -213,11 +249,14 @@
       const text = compact(el.innerText || el.getAttribute("aria-label") || "");
       if (!text) return;
       if (links.length >= 40) return;
-      links.push({
-        text,
+      const rec = {
+        text: compact(text, 80),
         href,
         selector: selectorFor(el),
-      });
+      };
+      rec.chrome = isChromeLink(rec);
+      if (rec.chrome) return;
+      links.push(rec);
     });
 
     const passwordFields = [
@@ -253,6 +292,7 @@
     );
 
     const pathways = [];
+    let activateCount = 0;
     if (authLikely) {
       pathways.push({
         id: "handoff-login",
@@ -304,8 +344,10 @@
         summary: `Form ${f.selector || "#" + i} (${f.method.toUpperCase()} ${f.action || "."}) — fill listed fields, activate ${submit ? submit.selector : "submit"}.`,
       });
     });
-    buttons.slice(0, 15).forEach((b, i) => {
-      if (LOGIN_RE.test(b.text)) return;
+    buttons.forEach((b, i) => {
+      if (LOGIN_RE.test(b.text) || b.chrome || b.disabled) return;
+      if (activateCount >= ACTIVATE_PATHWAY_CAP) return;
+      activateCount += 1;
       pathways.push({
         id: `button-${i}`,
         kind: "activate",

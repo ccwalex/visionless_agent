@@ -68,8 +68,15 @@ python3 scripts/inspect.py --html tests/fixtures/login.html --json
 python3 scripts/inspect.py --url https://example.com --json
 
 # Follow a tab you already have open (cookies, login, SPA state) — preferred
-python3 scripts/inspect.py --cdp 9222 --json
+python3 scripts/inspect.py --cdp 9222 --json --filter next
 python3 scripts/inspect.py --cdp 9222 --wait-login 180
+
+# Dense pages: print only next actions, or search box, or cap chrome
+python3 scripts/inspect.py --html tests/fixtures/search_form.html --filter next
+python3 scripts/inspect.py --cdp 9222 --json --filter search
+python3 scripts/inspect.py --cdp 9222 --json --links-only
+python3 scripts/inspect.py --cdp 9222 --json --filter next --links-only
+python3 scripts/inspect.py --cdp 9222 --json --filter buttons,links --limit 8
 
 # Fill a field from the inventory, submit the form (no mouse)
 python3 scripts/inspect.py --cdp 9222 --fill '#ybar-sbq' --value AAPL --submit-form '#ybar-sf' --json

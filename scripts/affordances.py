@@ -66,8 +66,17 @@ def _bool_attr(attrs: list[tuple[str, str | None]], name: str) -> bool:
     return raw.lower() in {"true", "disabled", "required", name}
 
 
-def compact(text: str) -> str:
-    return re.sub(r"\s+", " ", text or "").strip()[:240]
+def compact(text: str, limit: int = 240) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()[:limit]
+
+
+def _is_hidden_attrs(attrs: list[tuple[str, str | None]]) -> bool:
+    if _bool_attr(attrs, "hidden"):
+        return True
+    if _attr(attrs, "aria-hidden").lower() == "true":
+        return True
+    style = re.sub(r"\s+", "", _attr(attrs, "style").lower())
+    return "display:none" in style or "visibility:hidden" in style
 
 
 class AffordanceParser(HTMLParser):
@@ -86,6 +95,7 @@ class AffordanceParser(HTMLParser):
         self._label_for_stack: list[tuple[str, list[str]]] = []
         self.labels_by_id: dict[str, str] = {}
         self._text_targets: list[list[str]] = []
+        self.hidden_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
@@ -98,6 +108,13 @@ class AffordanceParser(HTMLParser):
             return
         if self.skip:
             self._open.append((tag, None, []))
+            return
+
+        hidden_here = _is_hidden_attrs(attrs)
+        if hidden_here:
+            self.hidden_depth += 1
+        if self.hidden_depth:
+            self._open.append((tag, {"_hidden_mark": hidden_here} if hidden_here else None, []))
             return
 
         if tag == "title":
@@ -231,6 +248,9 @@ class AffordanceParser(HTMLParser):
                 continue
             if opened != tag:
                 continue
+            if rec is not None and rec.get("_hidden_mark"):
+                if self.hidden_depth:
+                    self.hidden_depth -= 1
             if tag == "form" and self.form_stack:
                 self.form_stack.pop()
             if tag == "label" and self._label_for_stack:
@@ -470,29 +490,290 @@ def inventory_from_html(html: str, url: str = "") -> dict[str, Any]:
             }
         )
 
-    return {
-        "source": "html-dump",
-        "url": url,
-        "title": title,
-        "auth": {
-            "likely": auth_likely,
-            "captcha": captcha,
-            "password_fields": len(password_fields),
-            "login_buttons": [b.get("text") for b in login_buttons],
-            "signals": [
-                s
-                for s in [
-                    "password_input" if password_fields else None,
-                    "login_cta" if login_buttons else None,
-                    "title" if LOGIN_RE.search(title) else None,
-                    "captcha" if captcha else None,
-                ]
-                if s
-            ],
-        },
-        "forms": forms,
-        "buttons": buttons,
-        "loose_fields": loose,
-        "links": parser.links,
-        "pathways": pathways,
+    return finalize_inventory(
+        {
+            "source": "html-dump",
+            "url": url,
+            "title": title,
+            "auth": {
+                "likely": auth_likely,
+                "captcha": captcha,
+                "password_fields": len(password_fields),
+                "login_buttons": [b.get("text") for b in login_buttons],
+                "signals": [
+                    s
+                    for s in [
+                        "password_input" if password_fields else None,
+                        "login_cta" if login_buttons else None,
+                        "title" if LOGIN_RE.search(title) else None,
+                        "captcha" if captcha else None,
+                    ]
+                    if s
+                ],
+            },
+            "forms": forms,
+            "buttons": buttons,
+            "loose_fields": loose,
+            "links": parser.links,
+            "pathways": pathways,
+        }
+    )
+
+
+FILTER_SECTIONS = frozenset(
+    {
+        "pathways",
+        "forms",
+        "buttons",
+        "links",
+        "loose_fields",
+        "auth",
+        "handoff",
     }
+)
+FILTER_PRESETS = {
+    "next": ("auth", "handoff", "pathways"),
+    "search": ("auth", "handoff", "pathways", "forms"),
+    "interactive": ("auth", "handoff", "pathways", "forms", "buttons", "loose_fields"),
+    "links-only": ("links",),
+    "index": ("links",),
+}
+FILTER_ALIASES = {
+    "fields": "loose_fields",
+    "actions": "pathways",
+}
+_CORE_KEYS = ("source", "url", "title", "fetch", "saved_html")
+
+ACTIVATE_PATHWAY_CAP = 5
+LINK_TEXT_LIMIT = 80
+
+BUTTON_CHROME_RE = re.compile(
+    r"cookie|consent|accept all|reject all|agree (and|&)|manage (cookies|preferences)|"
+    r"do not sell|privacy settings|subscribe|newsletter|skip to( main)? content|"
+    r"\bclose\b|\bdismiss\b|\bmenu\b|hamburger|notifications?|\bshare\b|"
+    r"get \w+ plus|\badvertis",
+    re.I,
+)
+LINK_CHROME_RE = re.compile(
+    r"cookie|consent|skip to( main)? content|facebook\.com|twitter\.com|"
+    r"(^|/)x\.com|instagram\.|pinterest\.|tiktok\.|whatsapp",
+    re.I,
+)
+
+
+def is_chrome_button(rec: dict[str, Any]) -> bool:
+    blob = " ".join(
+        str(rec.get(k) or "") for k in ("text", "id", "selector", "name", "href")
+    )
+    return bool(BUTTON_CHROME_RE.search(blob))
+
+
+def is_chrome_link(rec: dict[str, Any]) -> bool:
+    blob = " ".join(str(rec.get(k) or "") for k in ("text", "href", "selector"))
+    return bool(LINK_CHROME_RE.search(blob))
+
+
+def _pathway_rank(pathway: dict[str, Any]) -> int:
+    kind = pathway.get("kind")
+    ident = str(pathway.get("id") or "")
+    if kind == "handoff":
+        return 0
+    if ident.startswith("search-form") or pathway.get("get_shortcut"):
+        return 1
+    if kind == "fill_and_submit":
+        return 2
+    return 3
+
+
+def assign_refs(inv: dict[str, Any]) -> dict[str, Any]:
+    """Lynx-style ordinals. Prefer compact numbers on the visible action surface."""
+    n = 1
+    by_sel: dict[str, int] = {}
+
+    def take(selector: str | None = None) -> int:
+        nonlocal n
+        if selector and selector in by_sel:
+            return by_sel[selector]
+        ref = n
+        n += 1
+        if selector:
+            by_sel[selector] = ref
+        return ref
+
+    for pathway in inv.get("pathways") or []:
+        fill = pathway.get("fill") if isinstance(pathway.get("fill"), dict) else {}
+        sel = (
+            pathway.get("selector")
+            or (fill or {}).get("selector")
+            or pathway.get("form_selector")
+        )
+        pathway["ref"] = take(sel)
+    for form in inv.get("forms") or []:
+        for field in form.get("fields") or []:
+            if field.get("type") == "hidden":
+                continue
+            field["ref"] = take(field.get("selector"))
+        for sub in form.get("submits") or []:
+            sub["ref"] = take(sub.get("selector"))
+    for button in inv.get("buttons") or []:
+        button["ref"] = take(button.get("selector"))
+    for field in inv.get("loose_fields") or []:
+        field["ref"] = take(field.get("selector"))
+    for link in inv.get("links") or []:
+        link["ref"] = take(link.get("selector"))
+    inv["ref_count"] = n - 1
+    return inv
+
+
+def finalize_inventory(inv: dict[str, Any]) -> dict[str, Any]:
+    """Rank pathways, drop chrome/nav activate noise, assign refs. Safe to call twice."""
+    for button in inv.get("buttons") or []:
+        button["chrome"] = is_chrome_button(button)
+    kept_links: list[dict[str, Any]] = []
+    for link in inv.get("links") or []:
+        link["text"] = compact(link.get("text") or "", LINK_TEXT_LIMIT)
+        link["chrome"] = is_chrome_link(link)
+        if link["chrome"]:
+            continue
+        kept_links.append(link)
+    inv["links"] = kept_links
+
+    kept = [p for p in inv.get("pathways") or [] if p.get("kind") != "activate"]
+    activate: list[dict[str, Any]] = []
+    for i, button in enumerate(inv.get("buttons") or []):
+        if button.get("chrome") or button.get("disabled"):
+            continue
+        if LOGIN_RE.search(button.get("text") or ""):
+            continue
+        activate.append(
+            {
+                "id": f"button-{i}",
+                "kind": "activate",
+                "selector": button.get("selector"),
+                "text": button.get("text"),
+                "summary": (
+                    f"Activate {button.get('selector')} "
+                    f"(“{button.get('text') or button.get('kind')}”)."
+                ),
+            }
+        )
+        if len(activate) >= ACTIVATE_PATHWAY_CAP:
+            break
+    inv["pathways"] = sorted(kept, key=_pathway_rank) + activate
+    return assign_refs(inv)
+
+
+def parse_filter_spec(raw: str | None) -> tuple[frozenset[str], bool]:
+    """Return (sections to keep, slim_to_search). Empty spec means keep everything."""
+    if not raw or not str(raw).strip():
+        return FILTER_SECTIONS, False
+    tokens = [part.strip().lower() for part in str(raw).split(",") if part.strip()]
+    if not tokens:
+        return FILTER_SECTIONS, False
+    sections: set[str] = set()
+    slim_search = False
+    unknown: list[str] = []
+    for token in tokens:
+        if token in FILTER_PRESETS:
+            sections.update(FILTER_PRESETS[token])
+            if token == "search":
+                slim_search = True
+            continue
+        token = FILTER_ALIASES.get(token, token)
+        if token in FILTER_SECTIONS:
+            sections.add(token)
+        else:
+            unknown.append(token)
+    if unknown:
+        allowed = ", ".join(sorted(FILTER_SECTIONS | set(FILTER_PRESETS) | set(FILTER_ALIASES)))
+        raise ValueError(f"Unknown --filter token(s): {', '.join(unknown)}. Use: {allowed}")
+    return frozenset(sections), slim_search
+
+
+def _search_form_selectors(inv: dict[str, Any]) -> set[str]:
+    selectors: set[str] = set()
+    for pathway in inv.get("pathways") or []:
+        if pathway.get("id", "").startswith("search-form") or pathway.get("get_shortcut"):
+            sel = pathway.get("form_selector")
+            if sel:
+                selectors.add(sel)
+    return selectors
+
+
+def project_inventory(
+    inv: dict[str, Any],
+    filter_spec: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Shrink a full inventory for agent stdout. Counts always reflect the unfiltered page."""
+    sections, slim_search = parse_filter_spec(filter_spec)
+    filtering = bool(filter_spec and str(filter_spec).strip())
+    capping = limit is not None and limit >= 0
+    if not filtering and not capping:
+        return inv
+
+    counts = {
+        "forms": len(inv.get("forms") or []),
+        "buttons": len(inv.get("buttons") or []),
+        "links": len(inv.get("links") or []),
+        "loose_fields": len(inv.get("loose_fields") or []),
+        "pathways": len(inv.get("pathways") or []),
+    }
+    out: dict[str, Any] = {key: inv[key] for key in _CORE_KEYS if key in inv}
+    if filtering:
+        out["filter"] = [part.strip() for part in str(filter_spec).split(",") if part.strip()]
+    if capping:
+        out["limit"] = limit
+    out["counts"] = counts
+
+    pathways = list(inv.get("pathways") or [])
+    forms = list(inv.get("forms") or [])
+    if slim_search:
+        search_sels = _search_form_selectors(inv)
+        pathways = [
+            p
+            for p in pathways
+            if p.get("kind") == "handoff"
+            or str(p.get("id") or "").startswith("search-form")
+            or p.get("get_shortcut")
+        ]
+        if search_sels:
+            forms = [f for f in forms if f.get("selector") in search_sels]
+        else:
+            forms = []
+
+    if capping:
+        keep_pathways: list[dict[str, Any]] = []
+        activate_kept = 0
+        for pathway in pathways:
+            if pathway.get("kind") == "activate":
+                if activate_kept >= limit:
+                    continue
+                activate_kept += 1
+            keep_pathways.append(pathway)
+        pathways = keep_pathways
+
+    def cap(items: list[Any]) -> list[Any]:
+        if not capping:
+            return items
+        return items[:limit]
+
+    visible_buttons = [b for b in (inv.get("buttons") or []) if not b.get("chrome")]
+    visible_links = list(inv.get("links") or [])
+
+    if "auth" in sections:
+        out["auth"] = inv.get("auth")
+    if "handoff" in sections and "handoff" in inv:
+        out["handoff"] = inv["handoff"]
+    if "pathways" in sections:
+        out["pathways"] = pathways
+    if "forms" in sections:
+        out["forms"] = forms
+    if "buttons" in sections:
+        out["buttons"] = cap(visible_buttons)
+    if "links" in sections:
+        out["links"] = cap(visible_links)
+    if "loose_fields" in sections:
+        out["loose_fields"] = cap(list(inv.get("loose_fields") or []))
+    return assign_refs(out)
+

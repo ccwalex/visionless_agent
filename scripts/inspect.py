@@ -12,7 +12,6 @@ agents can choose selectors/pathways without screenshots or mouse coordinates.
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import subprocess
@@ -20,11 +19,19 @@ import sys
 import tempfile
 import time
 import urllib.request
+from pathlib import Path
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_SCRIPT_DIR_RESOLVED = Path(SCRIPT_DIR).resolve()
 sys.path.insert(0, SCRIPT_DIR)
 
-from affordances import inventory_from_html  # noqa: E402
+from affordances import finalize_inventory, inventory_from_html, project_inventory  # noqa: E402
+
+# This file is named inspect.py; if scripts/ stays on sys.path, Python 3.14
+# argparse/colorize imports *this* module instead of stdlib inspect.
+sys.path[:] = [p for p in sys.path if Path(p).resolve() != _SCRIPT_DIR_RESOLVED]
+
+import argparse  # noqa: E402
 
 HANDOFF_EXIT = 3
 
@@ -149,46 +156,77 @@ def attach_handoff(inv: dict, args: argparse.Namespace) -> dict:
 def print_human(inv: dict) -> None:
     print(f"source: {inv.get('source')}  url: {inv.get('url')}")
     print(f"title: {inv.get('title')}")
-    auth = inv.get("auth") or {}
-    print(
-        f"auth.likely: {auth.get('likely')}  captcha: {auth.get('captcha')}  "
-        f"signals: {', '.join(auth.get('signals') or []) or 'none'}"
-    )
+    counts = inv.get("counts")
+    if counts:
+        shown = []
+        if inv.get("filter"):
+            shown.append(f"filter={','.join(inv['filter'])}")
+        if inv.get("limit") is not None:
+            shown.append(f"limit={inv['limit']}")
+        print(
+            "counts: "
+            + " ".join(f"{k}={v}" for k, v in counts.items())
+            + (("  " + " ".join(shown)) if shown else "")
+        )
+    if "auth" in inv:
+        auth = inv.get("auth") or {}
+        print(
+            f"auth.likely: {auth.get('likely')}  captcha: {auth.get('captcha')}  "
+            f"signals: {', '.join(auth.get('signals') or []) or 'none'}"
+        )
     handoff = inv.get("handoff") or {}
     if handoff.get("required"):
         print("HANDOFF REQUIRED")
         print(f"  {handoff.get('instruction')}")
-    print("pathways:")
-    if not inv.get("pathways"):
-        print("  (none)")
-    for p in inv.get("pathways") or []:
-        print(f"  - [{p.get('kind')}] {p.get('id')}: {p.get('summary')}")
-    print("forms:")
-    for form in inv.get("forms") or []:
-        print(
-            f"  - {form.get('selector')} {form.get('method', '').upper()} {form.get('action') or '.'}"
-        )
-        for field in form.get("fields") or []:
-            req = " required" if field.get("required") else ""
+    if "pathways" in inv:
+        print("pathways:")
+        if not inv.get("pathways"):
+            print("  (none)")
+        for p in inv.get("pathways") or []:
+            ref = p.get("ref")
+            prefix = f"[{ref}] " if ref is not None else ""
+            print(f"  - {prefix}[{p.get('kind')}] {p.get('id')}: {p.get('summary')}")
+    if "forms" in inv:
+        print("forms:")
+        for form in inv.get("forms") or []:
             print(
-                f"      field {field.get('selector')} type={field.get('type')} "
-                f"name={field.get('name')} label={field.get('label')!r}{req}"
+                f"  - {form.get('selector')} {form.get('method', '').upper()} {form.get('action') or '.'}"
             )
-        for sub in form.get("submits") or []:
-            print(f"      submit {sub.get('selector')} {sub.get('text')!r}")
-    loose = inv.get("loose_fields") or []
-    if loose:
-        print("loose_fields:")
-        for field in loose:
-            print(f"  - {field.get('selector')} type={field.get('type')} label={field.get('label')!r}")
-    print("buttons:")
-    for button in inv.get("buttons") or []:
-        print(f"  - {button.get('selector')} {button.get('kind')} {button.get('text')!r}")
-    links = inv.get("links") or []
-    if links:
-        print("links (sample):")
-        for link in links[:12]:
-            print(f"  - {link.get('text')!r} -> {link.get('href')}")
+            for field in form.get("fields") or []:
+                req = " required" if field.get("required") else ""
+                print(
+                    f"      field {field.get('selector')} type={field.get('type')} "
+                    f"name={field.get('name')} label={field.get('label')!r}{req}"
+                )
+            for sub in form.get("submits") or []:
+                print(f"      submit {sub.get('selector')} {sub.get('text')!r}")
+    if "loose_fields" in inv:
+        loose = inv.get("loose_fields") or []
+        if loose:
+            print("loose_fields:")
+            for field in loose:
+                print(
+                    f"  - {field.get('selector')} type={field.get('type')} label={field.get('label')!r}"
+                )
+    if "buttons" in inv:
+        print("buttons:")
+        for button in inv.get("buttons") or []:
+            ref = button.get("ref")
+            prefix = f"[{ref}] " if ref is not None else ""
+            chrome = " chrome" if button.get("chrome") else ""
+            print(
+                f"  - {prefix}{button.get('selector')} {button.get('kind')} "
+                f"{button.get('text')!r}{chrome}"
+            )
+    if "links" in inv:
+        links = inv.get("links") or []
+        if links:
+            print("links:" if inv.get("counts") or "pathways" not in inv else "links (sample):")
+            shown = links if inv.get("counts") or "pathways" not in inv else links[:12]
+            for link in shown:
+                ref = link.get("ref")
+                prefix = f"[{ref}] " if ref is not None else ""
+                print(f"  - {prefix}{link.get('text')!r} -> {link.get('href')}")
 
 
 def run(args: argparse.Namespace) -> tuple[dict, int]:
@@ -197,6 +235,7 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
             html = fh.read()
         inv = inventory_from_html(html, url=args.url or args.html)
         inv = attach_handoff(inv, args)
+        inv = finalize_inventory(inv)
         return inv, HANDOFF_EXIT if inv["handoff"]["required"] and not args.ignore_handoff else 0
 
     if args.cdp:
@@ -220,6 +259,7 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
                 submit_form=args.submit_form,
             )
             inv = attach_handoff(inv, args)
+            inv = finalize_inventory(inv)
             if not inv["handoff"]["required"]:
                 return inv, 0
             if deadline is None:
@@ -250,6 +290,7 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
     inv = inventory_from_html(html, url=url)
     inv["fetch"] = source_note
     inv = attach_handoff(inv, args)
+    inv = finalize_inventory(inv)
     code = HANDOFF_EXIT if inv["handoff"]["required"] and not args.ignore_handoff else 0
     if args.save_html:
         with open(args.save_html, "w", encoding="utf-8") as fh:
@@ -288,6 +329,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--include-hidden", action="store_true")
     p.add_argument("--ignore-handoff", action="store_true", help="Exit 0 even when login/captcha is present")
+    p.add_argument(
+        "--filter",
+        metavar="SPEC",
+        help=(
+            "Comma-separated sections to print: pathways,forms,buttons,links,"
+            "loose_fields,auth,handoff. Presets: next (auth+pathways), "
+            "search (search box/forms only), interactive (no links), "
+            "links-only / index (Lynx-style link list). "
+            "Adds counts of the unfiltered page."
+        ),
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        metavar="N",
+        help="Cap buttons, links, loose_fields, and activate-pathways (keeps search/handoff pathways).",
+    )
+    p.add_argument(
+        "--links-only",
+        action="store_true",
+        help="Print the compact link index (same as --filter links-only). Combine with --filter next for pathways + index.",
+    )
     p.add_argument("--json", action="store_true")
     p.add_argument("--save-html", metavar="PATH")
     return p
@@ -297,6 +360,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         inv, code = run(args)
+        filter_spec = args.filter
+        if args.links_only:
+            filter_spec = f"{filter_spec},links-only" if filter_spec else "links-only"
+        inv = project_inventory(inv, filter_spec=filter_spec, limit=args.limit)
     except Exception as exc:
         err = {"error": "inspect_failed", "message": str(exc)}
         if getattr(args, "json", False):

@@ -10,7 +10,7 @@ import unittest
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
-from affordances import inventory_from_html  # noqa: E402
+from affordances import inventory_from_html, project_inventory  # noqa: E402
 
 
 def fixture(name: str) -> str:
@@ -103,6 +103,125 @@ class CliTests(unittest.TestCase):
         data = json.loads(proc.stdout)
         self.assertTrue(data["handoff"]["required"])
         self.assertIn("--cdp", " ".join(data["handoff"]["resume"]))
+
+
+class FilterViewTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.inv = inventory_from_html(fixture("search_form.html"), url="https://library.test/")
+
+    def test_next_drops_chrome(self) -> None:
+        view = project_inventory(self.inv, filter_spec="next")
+        self.assertIn("pathways", view)
+        self.assertIn("auth", view)
+        self.assertNotIn("buttons", view)
+        self.assertNotIn("links", view)
+        self.assertNotIn("forms", view)
+        self.assertEqual(view["counts"]["forms"], 2)
+        self.assertEqual(view["counts"]["buttons"], 1)
+
+    def test_search_keeps_query_form_only(self) -> None:
+        view = project_inventory(self.inv, filter_spec="search")
+        ids = {f["id"] for f in view["forms"]}
+        self.assertEqual(ids, {"search"})
+        kinds = {p["kind"] for p in view["pathways"]}
+        self.assertIn("fill_and_submit", kinds)
+        self.assertNotIn("activate", kinds)
+
+    def test_limit_caps_buttons(self) -> None:
+        view = project_inventory(self.inv, limit=0)
+        self.assertEqual(view["buttons"], [])
+        self.assertEqual(view["counts"]["buttons"], 1)
+        self.assertEqual(view["limit"], 0)
+
+    def test_unknown_token(self) -> None:
+        with self.assertRaises(ValueError):
+            project_inventory(self.inv, filter_spec="screenshots")
+
+
+class CliFilterTests(unittest.TestCase):
+    def test_filter_next_json(self) -> None:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(ROOT, "scripts", "inspect.py"),
+                "--html",
+                os.path.join(ROOT, "tests", "fixtures", "search_form.html"),
+                "--json",
+                "--filter",
+                "next",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["filter"], ["next"])
+        self.assertIn("pathways", data)
+        self.assertNotIn("links", data)
+
+
+class LynxIndexTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.inv = inventory_from_html(fixture("dense_chrome.html"), url="https://market.test/")
+        self.search = inventory_from_html(fixture("search_form.html"), url="https://library.test/")
+
+    def test_hidden_and_chrome_elided(self) -> None:
+        texts = [b["text"] for b in self.inv["buttons"]]
+        self.assertNotIn("Hidden ghost", texts)
+        self.assertNotIn("Aria ghost", texts)
+        hrefs = [l["href"] for l in self.inv["links"]]
+        self.assertNotIn("/secret", hrefs)
+        self.assertTrue(any("facebook" in h for h in hrefs) is False)
+        self.assertIn("/news/diesel", hrefs)
+
+    def test_activate_skips_chrome_keeps_export(self) -> None:
+        activate = [p for p in self.inv["pathways"] if p["kind"] == "activate"]
+        texts = [p.get("text") for p in activate]
+        self.assertNotIn("Accept all cookies", texts)
+        self.assertNotIn("Share", texts)
+        self.assertIn("Export CSV", texts)
+
+    def test_search_ranked_before_activate(self) -> None:
+        kinds = [p["kind"] for p in self.inv["pathways"]]
+        self.assertEqual(kinds[0], "fill_and_submit")
+        self.assertTrue(self.inv["pathways"][0]["id"].startswith("search-form"))
+
+    def test_refs_are_monotonic(self) -> None:
+        refs = [p["ref"] for p in self.search["pathways"]]
+        self.assertEqual(refs, list(range(1, len(refs) + 1)))
+        export = next(b for b in self.search["buttons"] if b["id"] == "export")
+        self.assertIsInstance(export["ref"], int)
+
+    def test_links_only_renumbers(self) -> None:
+        view = project_inventory(self.inv, filter_spec="links-only")
+        self.assertNotIn("pathways", view)
+        self.assertNotIn("buttons", view)
+        self.assertEqual(view["links"][0]["ref"], 1)
+        self.assertTrue(all("/news/" in l["href"] or l["href"].startswith("/") for l in view["links"]))
+
+
+class CliLinksOnlyTests(unittest.TestCase):
+    def test_links_only_flag(self) -> None:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(ROOT, "scripts", "inspect.py"),
+                "--html",
+                os.path.join(ROOT, "tests", "fixtures", "search_form.html"),
+                "--json",
+                "--links-only",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["filter"], ["links-only"])
+        self.assertIn("links", data)
+        self.assertNotIn("pathways", data)
+        self.assertEqual(data["links"][0]["ref"], 1)
 
 
 if __name__ == "__main__":
